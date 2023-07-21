@@ -57,7 +57,7 @@ class MultiScaleRetention(nn.Module):
         self.decay = nn.Parameter(gamma, requires_grad=False)
 
     def get_parallel_decay_mask(self, length):
-        range_tensor = torch.arange(length)
+        range_tensor = torch.arange(length, device=self.decay.device)
         range_tensor = range_tensor[None, :, None].expand(self.config.num_heads, length, 1)
         exponent = range_tensor - range_tensor.transpose(-1, -2)
         decay_mask = self.decay.view(-1, 1, 1)**exponent
@@ -73,7 +73,8 @@ class MultiScaleRetention(nn.Module):
         # decay of the chunk
         chunk_decay = self.decay.view(1, self.config.num_heads, 1, 1)**chunk_size
         # cross-chunk decay
-        exponent = torch.arange(chunk_size, dtype=torch.float).unsqueeze(0) + 1
+        exponent = torch.arange(chunk_size, dtype=torch.float,
+                                device=decay_mask.device).unsqueeze(0) + 1
         inner_decay = (self.decay.unsqueeze(-1)**exponent).view(1, self.config.num_heads,
                                                                 chunk_size, 1)
         return decay_mask, chunk_decay, inner_decay
