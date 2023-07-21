@@ -53,7 +53,7 @@ from model import RetNetModelWithLMHead, RetNetConfig
 config = RetNetConfig(num_layers=8, vocab_size=100, hidden_size=512, num_heads=4, use_default_gamma=False, chunk_size=4)
 model = RetNetModel(config)
 
-input_ids = torch.LongTensor([[1,2,3,4]])
+input_ids = torch.LongTensor([[1,2,3,4,5,6,7,8]])
 
 # parallel forward
 generated = model.generate(input_ids, parallel_compute_prompt=True, max_new_tokens=20)
