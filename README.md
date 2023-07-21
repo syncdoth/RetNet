@@ -63,6 +63,14 @@ generated = model.generate(input_ids, parallel_compute_prompt=True, max_new_toke
   to compute `past_kv`, we can compute parallel forward first, then feed the `past_kv`
   in to recurrent forward, which can save number of forwards for GPU with enough memory.
 
+## Huggingface Integration
+
+The `huggingface` branch has `PretrainedModel` based implementation. This is WIP and not
+rigorously tested yet.
+
+Because of `sequence_offset` parameter, it cannot utilize `GenerateMixin.generate` function.
+Resorting to custom generate function for now.
+
 ## xpos note
 
 The authors mention xpos as $e^{in\theta}, e^{-im\theta}$ (equation 5). At first glance, this is
@@ -90,8 +98,3 @@ This is implemented in the `chunkwise_retention` function, named as `intra_decay
 
 This idea can also be applied to `parallel_retention` to obtain the correct `past_kv` that can be
 further fed into recurrent or chunkwise retention in the next token steps.
-## TODOs
-### Huggingface style
-
-- make the implementation based on huggingface `PretrainedModel`.
-- This includes handling `attention_mask` (for padding), etc.
