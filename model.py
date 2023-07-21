@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from transformers import top_k_top_p_filtering
 
 from utils import split_chunks, split_heads
 from xpos_relative_position import XPOS
@@ -267,3 +268,57 @@ class RetNetModelWithLMHead(RetNetModel):
         if return_kv:
             return lm_logits, kv_cache
         return lm_logits
+
+    def sample_token(self, logit, do_sample=False, top_k=1, top_p=1.0, temperature=1.0):
+        if not do_sample:
+            return torch.argmax(logit, dim=-1)
+        filtered = top_k_top_p_filtering(logit / temperature, top_k=top_k, top_p=top_p)
+        return torch.multinomial(torch.softmax(filtered, dim=-1), num_samples=1)
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        input_ids=None,
+        parallel_compute_prompt=True,
+        max_new_tokens=20,
+        bos_token_id=0,
+        eos_token_id=0,
+        do_sample=False,
+        top_k=1,
+        top_p=1.0,
+        temperature=1.0,
+        early_stopping=True,
+    ):
+        generated = []
+        if input_ids is not None:
+            if parallel_compute_prompt:
+                _, past_kv = self(input_ids[:, :-1], forward_impl='parallel', return_kv=True)
+            else:
+                past_kv = None
+                for p_i in range(input_ids.size(1) - 1):
+                    _, past_kv = self(input_ids[:, p_i:p_i + 1],
+                                      forward_impl='recurrent',
+                                      past_kv=past_kv,
+                                      return_kv=True,
+                                      sequence_offset=p_i)
+            token = input_ids[:, -1].unsqueeze(-1)  # [B, 1]
+        else:
+            token = torch.tensor([[bos_token_id]]).to(self.lm_head.weight.device)
+            past_kv = None
+
+        for i in range(max_new_tokens):
+            logit, past_kv = self(token,
+                                  forward_impl='recurrent',
+                                  past_kv=past_kv,
+                                  return_kv=True,
+                                  sequence_offset=i)
+            token = self.sample_token(logit,
+                                      do_sample=do_sample,
+                                      top_k=top_k,
+                                      top_p=top_p,
+                                      temperature=temperature)
+            generated.append(token)
+            if early_stopping and (token == eos_token_id).all():
+                break
+        generated = torch.cat(generated, dim=-1)
+        return generated

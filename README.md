@@ -7,7 +7,13 @@ Check `play.ipynb` for minimal testing of parallel, recurrent, and chunkwise for
 
 ## Getting Started
 
-**All you need is PyTorch.**
+~~**All you need is PyTorch.**~~ Using `PyTorch` and huggingface `transformers`.
+
+```bash
+pip install torch transformers
+```
+
+You may want to use `conda`.
 
 ### Quick Examples
 
@@ -36,6 +42,27 @@ rnn_outs = torch.cat(rnn_outs, dim=1)
 # chunkwise (implemented chunkwise within the forward)
 chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', return_kv=True)
 ```
+
+### Language Generation
+
+
+```python
+import torch
+from model import RetNetModelWithLMHead, RetNetConfig
+
+config = RetNetConfig(num_layers=8, vocab_size=100, hidden_size=512, num_heads=4, use_default_gamma=False, chunk_size=4)
+model = RetNetModel(config)
+
+input_ids = torch.LongTensor([[1,2,3,4]])
+
+# parallel forward
+generated = model.generate(input_ids, parallel_compute_prompt=True, max_new_tokens=20)
+```
+
+- `parallel_compute_prompt = (default: True)`: Thanks to parallel forward being able
+  to compute `past_kv`, we can compute parallel forward first, then feed the `past_kv`
+  in to recurrent forward, which can save number of forwards for GPU with enough memory.
+
 
 ## Examples
 
