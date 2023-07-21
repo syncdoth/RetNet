@@ -522,9 +522,9 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
                                    use_cache=True)
                     past_key_values = outputs.past_key_values
             token = input_ids[:, -1].unsqueeze(-1)  # [B, 1]
-            prompt_len = input_ids.shape[1]
+            prompt_len = input_ids.shape[1] - 1
         else:
-            prompt_len = 1  # bos token
+            prompt_len = 0
             token = torch.tensor([[bos_token_id]]).to(self.lm_head.weight.device)
             past_key_values = None
 
