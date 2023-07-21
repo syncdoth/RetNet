@@ -1,6 +1,6 @@
 # RetNet
 
-A minimal implementation of Retention Networks. [https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf)
+A minimal yet complete implementation of Retention Networks. [https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf)
 Supports all types of forward implementations: `parallel`, `recurrent`, `chunkwise`
 
 Check `play.ipynb` for minimal testing of parallel, recurrent, and chunkwise forward.
