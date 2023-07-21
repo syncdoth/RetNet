@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from utils import split_chunks, split_heads
-from complex_modules import ComplexGroupNorm, ComplexLayerNorm, ComplexFFN, ComplexLinear, ComplexPosition, silu
+from xpos_relative_position import XPOS
 
 
 @dataclass
@@ -37,16 +37,14 @@ class MultiScaleRetention(nn.Module):
     def __init__(self, config: RetNetConfig):
         super().__init__()
         self.config = config
-        self.qkv = ComplexLinear(config.hidden_size,
-                                 config.qk_dim * 2 + config.v_dim,
-                                 bias=config.use_bias_in_msr)
-        self.silu = silu
-        self.gated = ComplexLinear(config.hidden_size, config.v_dim, bias=False)
-        self.proj = ComplexLinear(config.v_dim, config.hidden_size, bias=config.use_bias_in_msr_out)
-        self.gn = ComplexGroupNorm(num_groups=config.num_heads,
-                                   num_channels=config.v_dim,
-                                   affine=False)
-        self.xpos = ComplexPosition(config.qk_dim, config.num_heads)
+        self.qkv = nn.Linear(config.hidden_size,
+                             config.qk_dim * 2 + config.v_dim,
+                             bias=config.use_bias_in_msr)
+        self.silu = nn.SiLU()
+        self.gated = nn.Linear(config.hidden_size, config.v_dim, bias=False)
+        self.proj = nn.Linear(config.v_dim, config.hidden_size, bias=config.use_bias_in_msr_out)
+        self.gn = nn.GroupNorm(num_groups=config.num_heads, num_channels=config.v_dim, affine=False)
+        self.xpos = XPOS(config.qk_dim)
 
         # initialize gamma
         if config.use_default_gamma:
@@ -89,7 +87,7 @@ class MultiScaleRetention(nn.Module):
         # [b, h, t, t]
         retention = q @ k.transpose(-1, -2) * k.size(-1)**-0.5  # (scaled dot-product)
         retention = retention * decay_mask
-        output = retention @ v.to(retention.dtype)
+        output = retention @ v
 
         # kv cache
         current_kv = k.unsqueeze(-1) * v.unsqueeze(-2)
@@ -106,7 +104,6 @@ class MultiScaleRetention(nn.Module):
         """
         past_kv = past_kv if past_kv is not None else 0
         decay = decay if decay is not None else 0
-        v = v.to(q.dtype)
         current_kv = decay * past_kv + k.transpose(-1, -2) @ v  # (b, h, d_k, d_v)
         output = q @ current_kv * k.size(-1)**-0.5  # (b, h, 1, d_v)
         return output, current_kv
@@ -126,7 +123,6 @@ class MultiScaleRetention(nn.Module):
         chunk_decay,  # 1 * num_head * 1 * 1
         inner_decay,  # 1 * num_head * chunk_size * 1
         """
-        v = v.to(q.dtype)
         # [bsz, num_head, chunk_size, chunk_size]
         retention = q @ k.transpose(-1, -2) * k.size(-1)**-0.5
         retention = retention * decay_mask
@@ -136,7 +132,6 @@ class MultiScaleRetention(nn.Module):
             cross_retention = 0
             past_chunk = 0
         else:
-            past_kv = past_kv.to(q.dtype)
             cross_retention = (q @ past_kv) * inner_decay * k.size(-1)**-0.5
             past_chunk = chunk_decay * past_kv
 
@@ -155,8 +150,8 @@ class MultiScaleRetention(nn.Module):
         B, T, H = x.size()
         q, k, v = self.qkv(x).split([self.config.qk_dim, self.config.qk_dim, self.config.v_dim],
                                     dim=-1)
+        q, k = self.xpos.rotate_queries_and_keys(q, k, offset=sequence_offset)
         q, k, v = split_heads((q, k, v), B, T, self.config.num_heads)
-        q, k = self.xpos(q, k, offset=sequence_offset)  # NOTE: returns complex numbers!
         # retention
         if forward_impl == 'parallel':
             decay_mask = self.get_parallel_decay_mask(T)
@@ -186,10 +181,11 @@ class MultiScaleRetention(nn.Module):
             raise ValueError(f'forward_impl {forward_impl} not supported.')
         # concaat heads
         retention_out = retention_out.transpose(1, 2).contiguous().view(B, T, self.config.v_dim)
-        # group norm
-        retention_out = self.gn(retention_out.transpose(1, 2)).transpose(1, 2)
+        # group norm (merge batch, length dimension -> group norm -> split back)
+        normed = self.gn(retention_out.view(B * T, self.config.v_dim))
+        normed = normed.view(B, T, self.config.v_dim)
         # out gate & proj
-        out = self.silu(self.gated(x)) * retention_out
+        out = self.silu(self.gated(x)) * normed
         return self.proj(out), curr_kv
 
 
@@ -200,16 +196,13 @@ class RetNetBlock(nn.Module):
         self.config = config
         self.msr = MultiScaleRetention(config)
 
-        # self.ffn = nn.Sequential(
-        #     nn.Linear(config.hidden_size, config.ffn_proj_size, bias=config.use_bias_in_mlp),
-        #     nn.GELU(),
-        #     nn.Linear(config.ffn_proj_size, config.hidden_size, bias=config.use_bias_in_mlp),
-        # )
-        self.ffn = ComplexFFN(config.hidden_size,
-                              config.ffn_proj_size,
-                              use_bias=config.use_bias_in_mlp)
-        self.ln1 = ComplexLayerNorm(config.hidden_size)
-        self.ln2 = ComplexLayerNorm(config.hidden_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(config.hidden_size, config.ffn_proj_size, bias=config.use_bias_in_mlp),
+            nn.GELU(),
+            nn.Linear(config.ffn_proj_size, config.hidden_size, bias=config.use_bias_in_mlp),
+        )
+        self.ln1 = nn.LayerNorm(config.hidden_size)
+        self.ln2 = nn.LayerNorm(config.hidden_size)
 
     def forward(self, x, past_kv=None, forward_impl='parallel', sequence_offset=0):
         msr, curr_kv = self.msr(self.ln1(x),
@@ -255,7 +248,7 @@ class RetNetModelWithLMHead(RetNetModel):
 
     def __init__(self, config: RetNetConfig) -> None:
         super().__init__(config)
-        self.lm_head = ComplexLinear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_weights:
             self.lm_head.weight = self.embedding.weight
 
