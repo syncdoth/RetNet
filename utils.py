@@ -7,4 +7,4 @@ def split_chunks(*tensors, size, dim=0):
 
 def split_heads(tensors, bsz, seqlen, num_heads):
     assert isinstance(tensors, (tuple, list))
-    return (x.reshape(bsz, seqlen, num_heads, -1).transpose(1, 2) for x in tensors)
+    return (x.view(bsz, seqlen, num_heads, -1).transpose(1, 2) for x in tensors)
