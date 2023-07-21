@@ -70,7 +70,7 @@ a complex number, which is difficult to use and interpret. However, this is in f
 which was made clear by this [lecture note](https://banica.u-cergy.fr/pdf/la3.pdf) for me.
 The gist is:
 
-$$ R_{\theta} = e^{i\theta} = \begin{bmatrix} cos(\theta) & -sin(\theta) \\ sin(\theta) & cos(\theta) \end{bmatrix}$$
+$$ R_{\theta} = e^{i\theta} = \begin{bmatrix} cos(\theta) & -sin(\theta); \\ sin(\theta) & cos(\theta) \end{bmatrix}$$
 
 Since xpos (which builds on RoPE) precisely does such a rotation, this is in fact, xpos.
 I used the implementation of xpos fould in [torchscale](https://github.com/microsoft/torchscale)
