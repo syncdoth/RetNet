@@ -63,10 +63,6 @@ generated = model.generate(input_ids, parallel_compute_prompt=True, max_new_toke
   to compute `past_kv`, we can compute parallel forward first, then feed the `past_kv`
   in to recurrent forward, which can save number of forwards for GPU with enough memory.
 
-
-## Examples
-
-
 ## xpos note
 
 The authors mention xpos as $e^{in\theta}, e^{-im\theta}$ (equation 5). At first glance, this is
