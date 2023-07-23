@@ -1,11 +1,20 @@
+import yaml
+
 from transformers.configuration_utils import PretrainedConfig
+
+
+def load_config_from_yaml(config_file):
+    with open(config_file, 'r') as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+        config = RetNetConfig.from_dict(config)
+    return config
 
 
 class RetNetConfig(PretrainedConfig):
     model_type = "retnet"
 
     def __init__(self,
-                 vocab_size: int = 32000,
+                 vocab_size: int = 50257,
                  hidden_size: int = 2048,
                  num_layers: int = 24,
                  num_heads: int = 8,
@@ -14,13 +23,14 @@ class RetNetConfig(PretrainedConfig):
                  ffn_proj_size: int = 4096,
                  use_bias_in_msr: bool = False,
                  use_bias_in_mlp: bool = True,
-                 use_bias_in_msr_out: bool = True,
+                 use_bias_in_msr_out: bool = False,
                  use_default_gamma: bool = False,
                  initializer_range: float = 0.02,
                  is_decoder: bool = True,
-                 pad_token_id: int = 0,
-                 eos_token_id: int = 1,
+                 pad_token_id: int = 50256,
+                 eos_token_id: int = 50256,
                  output_retentions: bool = False,
+                 use_cache: bool = True,
                  **kwargs):
 
         self.vocab_size = vocab_size
@@ -40,4 +50,5 @@ class RetNetConfig(PretrainedConfig):
         super().__init__(is_decoder=is_decoder,
                          pad_token_id=pad_token_id,
                          eos_token_id=eos_token_id,
+                         use_cache=use_cache,
                          **kwargs)

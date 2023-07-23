@@ -1,0 +1,16 @@
+vocab_size: 50257
+hidden_size: 1280
+num_layers: 12
+num_heads: 8
+qk_dim: 1280
+v_dim: 2560
+ffn_proj_size: 2560
+use_bias_in_msr: False
+use_bias_in_mlp: True
+use_bias_in_msr_out: False
+use_default_gamma: False
+initializer_range: 0.02
+output_retentions: False
+pad_token_id: 50256
+eos_token_id: 50256
+unk_token_id: 50256
