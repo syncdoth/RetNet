@@ -1,17 +1,32 @@
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import top_k_top_p_filtering
+from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from configuration_retnet import RetNetConfig
-from retnet_outputs import RetNetCausalLMOutputWithPast, RetNetOutputWithPast
 from utils import split_chunks, split_heads
 from xpos_relative_position import XPOS
 
 logger = logging.get_logger(__name__)
+
+
+# helper functions
+def split_chunks(*tensors, size, dim=0):
+    return [torch.split(x, size, dim=dim) for x in tensors]
+
+
+def split_heads(tensors, bsz, seqlen, num_heads):
+    assert isinstance(tensors, (tuple, list))
+    return [x.view(bsz, seqlen, num_heads, -1).transpose(1, 2) for x in tensors]
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 class MultiScaleRetention(nn.Module):
@@ -272,6 +287,41 @@ class RetNetPreTrainedModel(PreTrainedModel):
             module.gradient_checkpointing = value
 
 
+@dataclass
+class RetNetOutputWithPast(ModelOutput):
+    """
+    class for RetNet model's outputs that may also contain a past key/values (to speed up sequential decoding).
+
+    Args:
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the model.
+
+            If `past_key_values` is used only the last hidden-state of the sequences of shape `(batch_size, 1,
+            hidden_size)` is output.
+        past_key_values (`tuple(torch.FloatTensor)`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Tuple of `torch.FloatTensor` of length `config.n_layers`, with each tensor of shape
+            `(batch_size, num_heads, qk_dim, v_dim)`.
+
+            Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
+            that can be used (see `past_key_values` input) to speed up sequential decoding.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+        retentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_retentions=True` is passed or when `config.output_retentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Retentions weights, used for visualization.
+    """
+
+    last_hidden_state: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[torch.FloatTensor]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    retentions: Optional[Tuple[torch.FloatTensor]] = None
+
+
 class RetNetModel(RetNetPreTrainedModel):
 
     def __init__(self, config: RetNetConfig) -> None:
@@ -388,6 +438,41 @@ class RetNetModel(RetNetPreTrainedModel):
             hidden_states=all_hidden_states,
             retentions=all_retentions,
         )
+
+
+@dataclass
+class RetNetCausalLMOutputWithPast(ModelOutput):
+    """
+    class for RetNet causal language model (or autoregressive) outputs.
+
+    Args:
+        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
+            Language modeling loss (for next-token prediction).
+        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+        past_key_values (`tuple(torch.FloatTensor)`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Tuple of `torch.FloatTensor` of length `config.n_layers`, with each tensor of shape
+            `(batch_size, num_heads, qk_dim, v_dim)`.
+
+            Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
+            that can be used (see `past_key_values` input) to speed up sequential decoding.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+        retentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_retentions=True` is passed or when `config.output_retentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Retentions weights, used for visualization.
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[torch.FloatTensor]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    retentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class RetNetModelWithLMHead(RetNetPreTrainedModel):

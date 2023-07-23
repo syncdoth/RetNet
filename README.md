@@ -21,7 +21,7 @@ Take a look at `play.ipynb`.
 
 ```python
 import torch
-from model import RetNetModel
+from modeling_retnet import RetNetModel
 from configuration_retnet import RetNetConfig
 
 config = RetNetConfig(num_layers=8,
@@ -55,7 +55,7 @@ chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', use_cache=
 
 ```python
 import torch
-from model import RetNetModelWithLMHead
+from modeling_retnet import RetNetModelWithLMHead
 from configuration_retnet import load_config_from_yaml
 from transformers import AutoTokenizer
 
