@@ -21,26 +21,33 @@ Take a look at `play.ipynb`.
 
 ```python
 import torch
-from model import RetNetModel, RetNetConfig
+from model import RetNetModel
+from configuration_retnet import RetNetConfig
 
-config = RetNetConfig(num_layers=8, vocab_size=100, hidden_size=512, num_heads=4, use_default_gamma=False, chunk_size=4)
+config = RetNetConfig(num_layers=8,
+                      hidden_size=512,
+                      num_heads=4,
+                      qk_dim=512,
+                      v_dim=1024,
+                      ffn_proj_size=1024,
+                      use_default_gamma=False)
 model = RetNetModel(config)
 
-input_ids = torch.LongTensor([[1,2,3,4]])
+input_ids = torch.LongTensor([[1,2,3,4,5,6,7,8]])
 
 # parallel forward
-out, parallel_past_kv = model(input_ids, forward_impl='parallel', return_kv=True)
+out, parallel_past_kv = model(input_ids, forward_impl='parallel', use_cache=True)
 
 # recurrent forward
 past_kv = None
 rnn_outs = []
 for i in range(input_ids.shape[1]):
-    rnn_out, past_kv = model(input_ids[:, i:i+1], forward_impl='recurrent', past_kv=past_kv, return_kv=True, sequence_offset=i)
+    rnn_out, past_kv = model(input_ids[:, i:i+1], forward_impl='recurrent', past_key_values=past_kv, use_cache=True, sequence_offset=i)
     rnn_outs.append(rnn_out)
 rnn_outs = torch.cat(rnn_outs, dim=1)
 
 # chunkwise (implemented chunkwise within the forward)
-chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', return_kv=True)
+chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', use_cache=True, chunk_size=4)
 ```
 
 ### Language Generation
@@ -48,15 +55,22 @@ chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', return_kv=
 
 ```python
 import torch
-from model import RetNetModelWithLMHead, RetNetConfig
+from model import RetNetModelWithLMHead
+from configuration_retnet import load_config_from_yaml
+from transformers import AutoTokenizer
 
-config = RetNetConfig(num_layers=8, vocab_size=100, hidden_size=512, num_heads=4, use_default_gamma=False, chunk_size=4)
+config = load_config_from_yaml('configs/retnet-1.3b.yml')
 model = RetNetModel(config)
 
-input_ids = torch.LongTensor([[1,2,3,4,5,6,7,8]])
+tokenizer = AutoTokenizer("gpt2")
+tokenizer.model_max_length = 8192
+tokenizer.pad_token = tokenizer.eos_token
+
+inputs = tokenizer("Retention refers to", return_tensors='pt')
+inputs['retention_mask'] = inputs.pop('attention_mask')
 
 # parallel forward
-generated = model.generate(input_ids, parallel_compute_prompt=True, max_new_tokens=20)
+generated = model.generate(**inputs, parallel_compute_prompt=True, max_new_tokens=20)
 ```
 
 - `parallel_compute_prompt = (default: True)`: Thanks to parallel forward being able
