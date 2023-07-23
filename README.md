@@ -82,6 +82,30 @@ generated = model.generate(**inputs, parallel_compute_prompt=True, max_new_token
 Because of `sequence_offset` parameter, it cannot utilize `GenerateMixin.generate` function.
 Resorting to custom generate function for now.
 
+### Minimal Training Example
+
+You can train RetNet with huggingface `Trainer` API. Refer to `train.py`.
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+
+python train.py \
+    --model_size 300m \
+    --output_dir checkpoints \
+    --do_train --do_eval \
+    --prediction_loss_only \
+    --remove_unused_columns False \
+    --learning_rate 6e-4 \
+    --weight_decay 0.01 \
+    --max_steps 20000 \
+    --logging_steps 10 \
+    --eval_steps 1000 \
+    --save_steps 1000 \
+    --per_device_train_batch_size 16 \
+    --per_device_eval_batch_size 16
+
+```
+
 ## xpos note
 
 The authors mention xpos as $e^{in\theta}, e^{-im\theta}$ (equation 5). At first glance, this is
