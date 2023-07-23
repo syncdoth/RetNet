@@ -8,8 +8,8 @@ from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
-from configuration_retnet import RetNetConfig
-from xpos_relative_position import XPOS
+from .configuration_retnet import RetNetConfig
+from .xpos_relative_position import XPOS
 
 logger = logging.get_logger(__name__)
 
@@ -341,6 +341,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         retention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         output_retentions: Optional[bool] = None,
@@ -372,11 +373,14 @@ class RetNetModel(RetNetPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embedding(input_ids)
 
-        # TODO: might not need this
         if retention_mask is None:
-            retention_mask = torch.ones((batch_size, seq_length),
-                                        dtype=torch.bool,
-                                        device=inputs_embeds.device)
+            if attention_mask is not None:
+                retention_mask = attention_mask
+            else:
+                # TODO: might not need this
+                retention_mask = torch.ones((batch_size, seq_length),
+                                            dtype=torch.bool,
+                                            device=inputs_embeds.device)
 
         hidden_states = inputs_embeds
 
@@ -505,6 +509,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         retention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -519,6 +524,9 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         output_hidden_states = (output_hidden_states if output_hidden_states is not None else
                                 self.config.output_hidden_states)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if retention_mask is None and attention_mask is not None:
+            retention_mask = attention_mask
 
         outputs = self.model(input_ids,
                              retention_mask=retention_mask,
