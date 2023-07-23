@@ -1,13 +1,13 @@
 # RetNet
 
-A minimal yet complete implementation of Retention Networks. [https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf)
+A huggingface transformer compatible implementation of Retention Networks. ([https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf))
 Supports all types of forward implementations: `parallel`, `recurrent`, `chunkwise`
 
 Check `play.ipynb` for minimal testing of parallel, recurrent, and chunkwise forward.
 
 ## Getting Started
 
-~~**All you need is PyTorch.**~~ Using `PyTorch` and huggingface `transformers`.
+Using `PyTorch` and huggingface `transformers`.
 
 ```bash
 pip install torch transformers
@@ -21,8 +21,8 @@ Take a look at `play.ipynb`.
 
 ```python
 import torch
-from modeling_retnet import RetNetModel
-from configuration_retnet import RetNetConfig
+from retnet.modeling_retnet import RetNetModel
+from retnet.configuration_retnet import RetNetConfig
 
 config = RetNetConfig(num_layers=8,
                       hidden_size=512,
@@ -55,8 +55,8 @@ chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', use_cache=
 
 ```python
 import torch
-from modeling_retnet import RetNetModelWithLMHead
-from configuration_retnet import load_config_from_yaml
+from retnet.modeling_retnet import RetNetModelWithLMHead
+from retnet.configuration_retnet import load_config_from_yaml
 from transformers import AutoTokenizer
 
 config = load_config_from_yaml('configs/retnet-1.3b.yml')
@@ -78,9 +78,6 @@ generated = model.generate(**inputs, parallel_compute_prompt=True, max_new_token
   in to recurrent forward, which can save number of forwards for GPU with enough memory.
 
 ## Huggingface Integration
-
-The `huggingface` branch has `PretrainedModel` based implementation. This is WIP and not
-rigorously tested yet.
 
 Because of `sequence_offset` parameter, it cannot utilize `GenerateMixin.generate` function.
 Resorting to custom generate function for now.
@@ -112,3 +109,13 @@ This is implemented in the `chunkwise_retention` function, named as `intra_decay
 
 This idea can also be applied to `parallel_retention` to obtain the correct `past_kv` that can be
 further fed into recurrent or chunkwise retention in the next token steps.
+
+## Configs
+
+The `configs/` folder includes example configurations listed in the paper for
+different sizes. For simplicity, I used GPT2 tokenizer, and hence the model
+has 50217 as vocab size for default (this can change when microsoft release the official
+weight).
+
+- Technically, I used `EleutherAI/gpt-j-6b` tokenizer, which is identical except for
+  a few extra tokens.
