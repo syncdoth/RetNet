@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.utils.checkpoint
 from torch import nn
 from transformers import top_k_top_p_filtering
 from transformers.modeling_outputs import ModelOutput
