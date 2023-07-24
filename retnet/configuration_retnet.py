@@ -31,6 +31,8 @@ class RetNetConfig(PretrainedConfig):
                  eos_token_id: int = 50256,
                  output_retentions: bool = False,
                  use_cache: bool = True,
+                 forward_impl: str = 'parallel',
+                 chunk_size: int = 512,
                  **kwargs):
 
         self.vocab_size = vocab_size
@@ -46,6 +48,8 @@ class RetNetConfig(PretrainedConfig):
         self.use_default_gamma = use_default_gamma
         self.initializer_range = initializer_range
         self.output_retentions = output_retentions
+        self.forward_impl = forward_impl
+        self.chunk_size = chunk_size
 
         super().__init__(is_decoder=is_decoder,
                          pad_token_id=pad_token_id,

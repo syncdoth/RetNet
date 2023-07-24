@@ -518,7 +518,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         output_retentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        forward_impl: Optional[str] = 'parallel',
+        forward_impl: Optional[str] = None,
         sequence_offset: Optional[int] = 0,
         chunk_size: Optional[int] = None,
     ) -> Union[Tuple, RetNetCausalLMOutputWithPast]:
@@ -526,6 +526,8 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         output_hidden_states = (output_hidden_states if output_hidden_states is not None else
                                 self.config.output_hidden_states)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        forward_impl = forward_impl if forward_impl is not None else self.config.forward_impl
+        chunk_size = chunk_size if chunk_size is not None else self.config.chunk_size
 
         if retention_mask is None and attention_mask is not None:
             retention_mask = attention_mask
