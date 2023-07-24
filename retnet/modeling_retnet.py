@@ -583,6 +583,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         retention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         parallel_compute_prompt=True,
         max_new_tokens=20,
         bos_token_id=0,
@@ -593,6 +594,9 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         temperature=1.0,
         early_stopping=True,
     ):
+        if retention_mask is None and attention_mask is not None:
+            retention_mask = attention_mask
+
         generated = []
         if input_ids is not None:
             if input_ids.shape[1] == 1:

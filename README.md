@@ -35,19 +35,24 @@ model = RetNetModel(config)
 
 input_ids = torch.LongTensor([[1,2,3,4,5,6,7,8]])
 
-# parallel forward
-out, parallel_past_kv = model(input_ids, forward_impl='parallel', use_cache=True)
+parallel_outputs = model(input_ids, forward_impl='parallel', use_cache=True)
+parallel_state = parallel_outputs.last_hidden_state
+parallel_cache = parallel_outputs.past_key_values
 
-# recurrent forward
 past_kv = None
-rnn_outs = []
+rnn_state = []
 for i in range(input_ids.shape[1]):
-    rnn_out, past_kv = model(input_ids[:, i:i+1], forward_impl='recurrent', past_key_values=past_kv, use_cache=True, sequence_offset=i)
-    rnn_outs.append(rnn_out)
-rnn_outs = torch.cat(rnn_outs, dim=1)
+    rnn_out = model(input_ids[:, i:i+1], forward_impl='recurrent', past_key_values=past_kv, use_cache=True, sequence_offset=i)
+    rnn_state.append(rnn_out.last_hidden_state)
+    past_kv = rnn_out.past_key_values
+rnn_state = torch.cat(rnn_state, dim=1)
+rnn_cache = rnn_out.past_key_values
 
-# chunkwise (implemented chunkwise within the forward)
-chunk_out, chunk_past_kv = model(input_ids, forward_impl='chunkwise', use_cache=True, chunk_size=4)
+
+chunk_outputs = model(input_ids, forward_impl='chunkwise', use_cache=True, chunk_size=4)
+chunk_state = chunk_outputs.last_hidden_state
+chunk_cache = chunk_outputs.past_key_values
+
 ```
 
 ### Language Generation
@@ -60,17 +65,18 @@ from retnet.configuration_retnet import load_config_from_yaml
 from transformers import AutoTokenizer
 
 config = load_config_from_yaml('configs/retnet-1.3b.yml')
-model = RetNetModel(config)
+model = RetNetModelWithLMHead(config)
 
-tokenizer = AutoTokenizer("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
 tokenizer.model_max_length = 8192
 tokenizer.pad_token = tokenizer.eos_token
 
 inputs = tokenizer("Retention refers to", return_tensors='pt')
-inputs['retention_mask'] = inputs.pop('attention_mask')
 
 # parallel forward
 generated = model.generate(**inputs, parallel_compute_prompt=True, max_new_tokens=20)
+tokenizer.batch_decode(generated)
+# NOTE: this should be gibberish, since the model is not trained.
 ```
 
 - `parallel_compute_prompt = (default: True)`: Thanks to parallel forward being able
