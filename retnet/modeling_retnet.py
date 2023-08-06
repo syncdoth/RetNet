@@ -589,7 +589,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         bos_token_id=0,
         eos_token_id=0,
         do_sample=False,
-        top_k=1,
+        top_k=0,
         top_p=1.0,
         temperature=1.0,
         early_stopping=True,
