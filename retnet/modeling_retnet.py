@@ -636,7 +636,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
                            use_cache=True,
                            return_dict=True,
                            sequence_offset=prompt_len + i)
-            logit = outputs.logits
+            logit = outputs.logits.squeeze(0)
             past_key_values = outputs.past_key_values
             token = self.sample_token(logit,
                                       do_sample=do_sample,
