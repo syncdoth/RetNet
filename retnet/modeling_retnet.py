@@ -574,7 +574,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
 
     def sample_token(self, logit, do_sample=False, top_k=1, top_p=1.0, temperature=1.0):
         if not do_sample:
-            return torch.argmax(logit, dim=-1)
+            return torch.argmax(logit, dim=-1, keepdim=True)
         filtered = top_k_top_p_filtering(logit / temperature, top_k=top_k, top_p=top_p)
         return torch.multinomial(torch.softmax(filtered, dim=-1), num_samples=1)
 
