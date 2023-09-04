@@ -371,6 +371,9 @@ class RetNetModel(RetNetPreTrainedModel):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
+        if forward_impl == 'recurrent' and seq_length > 1:
+            raise ValueError('Recurrent forward only supports sequence length 1.')
+
         if inputs_embeds is None:
             inputs_embeds = self.embedding(input_ids)
 
