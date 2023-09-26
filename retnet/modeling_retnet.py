@@ -77,13 +77,12 @@ class RetNetRelPos(nn.Module):
                 forward_impl='parallel',
                 recurrent_chunk_size=None,
                 retention_mask=None):
-        # TODO: handle retention mask
-        if recurrent_chunk_size:
+        if recurrent_chunk_size is None:
             recurrent_chunk_size = self.recurrent_chunk_size
         if forward_impl == 'recurrent':
             sin = torch.sin(self.angle * (slen - 1))
             cos = torch.cos(self.angle * (slen - 1))
-            retention_rel_pos = ((sin, cos), self.decay.exp())
+            retention_rel_pos = ((sin, cos), self.decay.view(1, -1, 1, 1).exp())
         elif forward_impl == 'chunkwise':
             index = torch.arange(slen).to(self.decay)
             sin = torch.sin(index[:, None] * self.angle[None, :])
@@ -95,13 +94,20 @@ class RetNetRelPos(nn.Module):
                                      float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
             mask = torch.nan_to_num(mask)
+            mask = mask.unsqueeze(0)  # [1, h, t, t]
+            if retention_mask is not None:
+                # this is required for left padding
+                # TODO: check if it should be after scaling
+                retention_mask = retention_mask.float().view(-1, 1, 1, slen)
+                mask *= retention_mask
+            # scaling
             scale = mask.sum(dim=-1, keepdim=True).sqrt()
             mask = mask / scale
 
             cross_decay = torch.exp(self.decay * recurrent_chunk_size)
             inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
-            cross_decay = cross_decay[:, None, None]
-            inner_decay = inner_decay[:, :, None] / (scale / scale[:, -1, None])
+            cross_decay = cross_decay[None, :, None, None]
+            inner_decay = inner_decay[None, :, :, None] / (scale / scale[:, :, -1, None])
             retention_rel_pos = ((sin, cos), (mask, cross_decay, inner_decay))
         else:  # parallel
             index = torch.arange(slen).to(self.decay)
@@ -111,49 +117,17 @@ class RetNetRelPos(nn.Module):
             mask = torch.masked_fill(index[:, None] - index[None, :], ~mask.bool(), float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
             mask = torch.nan_to_num(mask)
+            mask = mask.unsqueeze(0)  # [1, h, t, t]
+            if retention_mask is not None:
+                # this is required for left padding
+                # TODO: check if it should be after scaling
+                retention_mask = retention_mask.float().view(-1, 1, 1, slen)
+                mask *= retention_mask
+            # scaling
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
             retention_rel_pos = ((sin, cos), mask)
 
         return retention_rel_pos
-
-    # for reference!
-    def get_parallel_decay_mask(self, length, retention_mask=None, return_scale=False):
-        range_tensor = torch.arange(length, device=self.decay.device)
-        range_tensor = range_tensor[None, :, None].expand(self.num_heads, length, 1)
-        exponent = range_tensor - range_tensor.transpose(-1, -2)
-        decay_mask = torch.exp(self.decay.view(-1, 1, 1) * exponent)  # FIX 1
-        decay_mask = torch.tril(decay_mask, diagonal=0)  # [h, t, t]
-        # FIX 2: rescale
-        scale = decay_mask.sum(dim=-1, keepdim=True).sqrt()
-        decay_mask = decay_mask / scale
-        decay_mask = decay_mask.unsqueeze(0)
-        if retention_mask is not None:
-            retention_mask = retention_mask.float().view(-1, 1, 1, length)
-            decay_mask *= retention_mask
-
-        if return_scale:
-            return decay_mask, scale.unsqueeze(0)
-        return decay_mask
-
-    def get_recurrent_decay(self):
-        decay = self.decay.view(1, self.num_heads, 1, 1)
-        return decay.exp()
-
-    def get_chunkwise_decay(self, retention_mask=None):
-        chunk_size = self.config.recurrent_chunk_size
-        # within chunk decay
-        decay_mask, scale = self.get_parallel_decay_mask(chunk_size,
-                                                         retention_mask=retention_mask,
-                                                         return_scale=True)
-        # decay of the chunk
-        chunk_decay = torch.exp(self.decay.view(1, self.num_heads, 1, 1) * chunk_size)  # FIX 1
-        # cross-chunk decay
-        exponent = torch.arange(chunk_size, dtype=torch.float,
-                                device=decay_mask.device).unsqueeze(0) + 1
-        inner_decay = torch.exp(self.decay.unsqueeze(-1) * exponent)
-        inner_decay = inner_decay.view(1, self.num_heads, chunk_size,
-                                       1) / (scale / scale[:, :, -1, None])
-        return decay_mask, chunk_decay, inner_decay
 
 
 class MultiScaleRetention(nn.Module):
@@ -717,8 +691,8 @@ class RetNetModel(RetNetPreTrainedModel):
             slen = seq_length
         # relative position
         retention_rel_pos = self.retnet_rel_pos(slen,
-                                                past_key_values is not None and not is_first_step,
                                                 forward_impl=forward_impl,
+                                                recurrent_chunk_size=recurrent_chunk_size,
                                                 retention_mask=retention_mask)
 
         # start running through the decoder layers
