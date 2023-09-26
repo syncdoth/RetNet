@@ -269,7 +269,7 @@ class FeedForwardNetwork(nn.Module):
         return x
 
 
-class RetNetBlock(nn.Module):
+class RetNetDecoderLayer(nn.Module):
 
     def __init__(self, config: RetNetConfig):
         super().__init__()
@@ -321,7 +321,7 @@ class RetNetPreTrainedModel(PreTrainedModel):
     config_class = RetNetConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["RetNetBlock"]
+    _no_split_modules = ["RetNetDecoderLayer"]
     _keys_to_ignore_on_load_unexpected = [r"decoder\.version"]
 
     def _init_weights(self, module):
@@ -381,7 +381,8 @@ class RetNetModel(RetNetPreTrainedModel):
         super().__init__(config)
         self.embedding = nn.Embedding(config.vocab_size, config.decoder_embed_dim,
                                       config.pad_token_id)
-        self.blocks = nn.ModuleList([RetNetBlock(config) for _ in range(config.decoder_layers)])
+        self.blocks = nn.ModuleList(
+            [RetNetDecoderLayer(config) for _ in range(config.decoder_layers)])
 
         self.gradient_checkpointing = False
         self.post_init()
