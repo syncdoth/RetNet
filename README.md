@@ -24,13 +24,10 @@ import torch
 from retnet.modeling_retnet import RetNetModel
 from retnet.configuration_retnet import RetNetConfig
 
-config = RetNetConfig(num_layers=8,
-                      hidden_size=512,
-                      num_heads=4,
-                      qk_dim=512,
-                      v_dim=1024,
-                      ffn_proj_size=1024,
-                      use_default_gamma=False)
+config = RetNetConfig(decoder_layers=8,
+                      decoder_embed_dim=512,
+                      decoder_retention_heads=4,
+                      decoder_ffn_embed_dim=1024)
 model = RetNetModel(config)
 
 input_ids = torch.LongTensor([[1,2,3,4,5,6,7,8]])
@@ -49,7 +46,7 @@ rnn_state = torch.cat(rnn_state, dim=1)
 rnn_cache = rnn_out.past_key_values
 
 
-chunk_outputs = model(input_ids, forward_impl='chunkwise', use_cache=True, chunk_size=4)
+chunk_outputs = model(input_ids, forward_impl='chunkwise', use_cache=True, recurrent_chunk_size=4)
 chunk_state = chunk_outputs.last_hidden_state
 chunk_cache = chunk_outputs.past_key_values
 
