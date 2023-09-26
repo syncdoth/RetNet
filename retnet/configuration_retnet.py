@@ -40,7 +40,6 @@ class RetNetConfig(PretrainedConfig):
             deepnorm: bool = False,
             subln: bool = True,
             layernorm_eps: float = 1e-5,
-            no_output_layer: bool = False,
             **kwargs):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
@@ -59,7 +58,6 @@ class RetNetConfig(PretrainedConfig):
         self.layernorm_embedding = layernorm_embedding
         self.deepnorm = deepnorm
         self.subln = subln
-        self.no_output_layer = no_output_layer
         self.layernorm_eps = layernorm_eps
         # Blockwise
         self.chunkwise_recurrent = chunkwise_recurrent

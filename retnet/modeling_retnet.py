@@ -355,13 +355,13 @@ class RetNetDecoderLayer(nn.Module):
         #     rel_pos=retention_rel_pos,
         #     chunkwise_recurrent=chunkwise_recurrent,
         # )
-        msr_outs = self.msr(hidden_states,
-                            retention_mask=retention_mask,
-                            past_key_value=past_key_value,
-                            forward_impl=forward_impl,
-                            sequence_offset=sequence_offset,
-                            recurrent_chunk_size=recurrent_chunk_size,
-                            output_retentions=output_retentions)
+        msr_outs = self.retention(hidden_states,
+                                  retention_mask=retention_mask,
+                                  past_key_value=past_key_value,
+                                  forward_impl=forward_impl,
+                                  sequence_offset=sequence_offset,
+                                  recurrent_chunk_size=recurrent_chunk_size,
+                                  output_retentions=output_retentions)
         hidden_states = msr_outs[0]
         curr_kv = msr_outs[1]
 
@@ -455,24 +455,91 @@ class RetNetOutputWithPast(ModelOutput):
 
 class RetNetModel(RetNetPreTrainedModel):
 
-    def __init__(self, config: RetNetConfig) -> None:
+    def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None):
         super().__init__(config)
-        self.embedding = nn.Embedding(config.vocab_size, config.decoder_embed_dim,
-                                      config.pad_token_id)
-        self.blocks = nn.ModuleList(
-            [RetNetDecoderLayer(config) for _ in range(config.decoder_layers)])
+        self.config = config
+
+        self.dropout_module = torch.nn.Dropout(config.dropout)
+
+        self.embed_dim = config.decoder_embed_dim
+        self.embed_scale = 1.0 if config.no_scale_embedding else math.sqrt(self.embed_dim)
+
+        if embed_tokens is None:
+            embed_tokens = nn.Embedding(config.vocab_size, config.decoder_embed_dim,
+                                        config.pad_token_id)
+        self.embed_tokens = embed_tokens
+
+        if config.layernorm_embedding:
+            self.layernorm_embedding = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        else:
+            self.layernorm_embedding = None
+
+        self.layers = nn.ModuleList([])
+
+        for i in range(config.decoder_layers):
+            self.layers.append(RetNetDecoderLayer(config, depth=i))
+
+        self.decoder_layers = len(self.layers)
+
+        if config.decoder_normalize_before:
+            self.layer_norm = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        else:
+            self.layer_norm = None
+
+        self.retnet_rel_pos = RetNetRelPos(config)
+        self.chunkwise_recurrent = config.chunkwise_recurrent
+        self.recurrent_chunk_size = config.recurrent_chunk_size
+
+        if config.deepnorm:
+            init_scale = math.pow(8.0 * config.decoder_layers, 0.25)
+            for name, p in self.named_parameters():
+                if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
+                    p.data.div_(init_scale)
+
+        if config.subln:
+            init_scale = math.sqrt(math.log(config.decoder_layers * 2))
+            for name, p in self.named_parameters():
+                if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
+                    p.data.mul_(init_scale)
 
         self.gradient_checkpointing = False
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.embedding
+        return self.embed_tokens
 
     def set_input_embeddings(self, value):
-        self.embedding = value
+        self.embed_tokens = value
+
+    def forward_embedding(
+        self,
+        input_ids,
+        inputs_embeds=None,
+        incremental_state=None,
+    ):
+        if incremental_state is not None and not self.is_first_step(incremental_state):
+            input_ids = input_ids[:, -1:]
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        embed = self.embed_scale * inputs_embeds
+
+        if self.layernorm_embedding is not None:
+            embed = self.layernorm_embedding(embed)
+
+        embed = self.dropout_module(embed)
+
+        return embed
+
+    def is_first_step(self, incremental_state):
+        if incremental_state is None:
+            return False
+        return incremental_state.get("is_first_step", False)
 
     def forward(
         self,
+        incremental_state=None,  # TODO: merge with past_key_values
         input_ids: torch.LongTensor = None,
         retention_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -507,8 +574,9 @@ class RetNetModel(RetNetPreTrainedModel):
         if forward_impl == 'recurrent' and seq_length > 1:
             raise ValueError('Recurrent forward only supports sequence length 1.')
 
+        # embed tokens
         if inputs_embeds is None:
-            inputs_embeds = self.embedding(input_ids)
+            inputs_embeds = self.forward_embedding(input_ids, inputs_embeds, incremental_state)
 
         if retention_mask is None:
             if attention_mask is not None:
@@ -519,17 +587,40 @@ class RetNetModel(RetNetPreTrainedModel):
                                             dtype=torch.bool,
                                             device=inputs_embeds.device)
 
+        is_first_step = self.is_first_step(incremental_state)
         hidden_states = inputs_embeds
 
+        need_pad_for_chunkwise = (self.chunkwise_recurrent and
+                                  seq_length % self.recurrent_chunk_size != 0)
+        if need_pad_for_chunkwise:
+            padding_len = self.recurrent_chunk_size - seq_length % self.recurrent_chunk_size
+            slen = seq_length + padding_len
+            hidden_states = F.pad(hidden_states, (0, 0, 0, padding_len))
+        else:
+            slen = seq_length
+        # relative position
+        retention_rel_pos = self.retnet_rel_pos(slen,
+                                                incremental_state is not None and not is_first_step,
+                                                chunkwise_recurrent=self.chunkwise_recurrent)
+
+        # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_retentions = () if output_retentions else None
         # layers * [bsz, num_head, qk_dim, decoder_embed_dim]
         next_decoder_cache = () if use_cache else None
 
-        for i, block in enumerate(self.blocks):
+        for idx, layer in enumerate(self.layers):
+            if incremental_state is None or is_first_step:
+                if is_first_step and incremental_state is not None:
+                    if idx not in incremental_state:
+                        incremental_state[idx] = {}
+            else:
+                if idx not in incremental_state:
+                    incremental_state[idx] = {}
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-            past_key_value = past_key_values[i] if past_key_values is not None else None
+            past_key_value = past_key_values[idx] if past_key_values is not None else None
 
             if self.gradient_checkpointing and self.training:
 
@@ -542,14 +633,21 @@ class RetNetModel(RetNetPreTrainedModel):
                     return custom_forward
 
                 block_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
+                    create_custom_forward(layer),
                     hidden_states,
+                    incremental_state[idx] if incremental_state is not None else None,
+                    retention_rel_pos,
+                    self.chunkwise_recurrent,
                     retention_mask,
                     forward_impl,
                     past_key_value,
                 )
             else:
-                block_outputs = block(hidden_states,
+                block_outputs = layer(hidden_states,
+                                      incremental_state=incremental_state[idx]
+                                      if incremental_state is not None else None,
+                                      retention_rel_pos=retention_rel_pos,
+                                      chunkwise_recurrent=self.chunkwise_recurrent,
                                       retention_mask=retention_mask,
                                       forward_impl=forward_impl,
                                       past_key_value=past_key_value,
@@ -570,6 +668,13 @@ class RetNetModel(RetNetPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
+
+        if need_pad_for_chunkwise:
+            hidden_states = hidden_states[:, :seq_length, :]
+
+        if self.layer_norm is not None:
+            hidden_states = self.layer_norm(hidden_states)
+
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_retentions]
                          if v is not None)
