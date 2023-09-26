@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -33,11 +33,24 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def rotate_every_two(x):
+    x1 = x[:, :, :, ::2]
+    x2 = x[:, :, :, 1::2]
+    x = torch.stack((-x2, x1), dim=-1)
+    return x.flatten(-2)  # in einsum notation: rearrange(x, '... d j -> ... (d j)')\
+
+
+def theta_shift(x, sin, cos):
+    return (x * cos) + (rotate_every_two(x) * sin)
+
+
 def get_activation_fn(activation):
     if activation == "relu":
         return F.relu
     elif activation == "gelu":
         return F.gelu
+    elif activation == "swish":
+        return F.silu
     else:
         raise NotImplementedError
 
@@ -51,16 +64,21 @@ class RetNetRelPos(nn.Module):
         angle = angle.unsqueeze(-1).repeat(1, 2).flatten()
         decay = torch.log(1 -
                           2**(-5 - torch.arange(config.decoder_retention_heads, dtype=torch.float)))
+        # NOTE: alternative way described in the paper
+        # s = torch.log(torch.tensor(1 / 32))
+        # e = torch.log(torch.tensor(1 / 512))
+        # decay = 1 - torch.exp(torch.linspace(s, e, self.num_heads))  # [h,]
         self.register_buffer("angle", angle)
         self.register_buffer("decay", decay)
         self.recurrent_chunk_size = config.recurrent_chunk_size
 
-    def forward(self, slen, activate_recurrent=False, chunkwise_recurrent=False):
-        if activate_recurrent:
+    def forward(self, slen, forward_impl='parallel'):
+        # TODO: handle retention mask
+        if forward_impl == 'recurrent':
             sin = torch.sin(self.angle * (slen - 1))
             cos = torch.cos(self.angle * (slen - 1))
             retention_rel_pos = ((sin, cos), self.decay.exp())
-        elif chunkwise_recurrent:
+        elif forward_impl == 'chunkwise':
             index = torch.arange(slen).to(self.decay)
             sin = torch.sin(index[:, None] * self.angle[None, :])
             cos = torch.cos(index[:, None] * self.angle[None, :])
@@ -93,29 +111,7 @@ class RetNetRelPos(nn.Module):
 
         return retention_rel_pos
 
-
-class MultiScaleRetention(nn.Module):
-    # TODO: normalization to decay in the paper
-    def __init__(self, config: RetNetConfig, value_factor: int = 2):
-        super().__init__()
-        self.config = config
-        self.embed_dim = config.decoder_embed_dim
-        self.v_dim = config.decoder_embed_dim * value_factor
-        self.num_heads = config.decoder_retention_heads
-
-        self.qkv = nn.Linear(self.embed_dim, self.embed_dim * 2 + self.v_dim, bias=True)
-        self.silu = nn.SiLU()
-        self.gated = nn.Linear(self.embed_dim, self.v_dim, bias=True)
-        self.proj = nn.Linear(self.v_dim, self.embed_dim, bias=True)
-        self.gn = nn.GroupNorm(num_groups=self.num_heads, num_channels=self.v_dim, affine=False)
-        self.xpos = XPOS(self.embed_dim)
-
-        # initialize gamma
-        s = torch.log(torch.tensor(1 / 32))
-        e = torch.log(torch.tensor(1 / 512))
-        gamma = 1 - torch.exp(torch.linspace(s, e, self.num_heads))  # [h,]
-        self.decay = nn.Parameter(gamma, requires_grad=False)
-
+    # for reference!
     def get_parallel_decay_mask(self, length, retention_mask=None, return_scale=False):
         range_tensor = torch.arange(length, device=self.decay.device)
         range_tensor = range_tensor[None, :, None].expand(self.num_heads, length, 1)
@@ -154,6 +150,45 @@ class MultiScaleRetention(nn.Module):
                                        1) / (scale / scale[:, :, -1, None])
         return decay_mask, chunk_decay, inner_decay
 
+
+class MultiScaleRetention(nn.Module):
+    # TODO: normalization to decay in the paper
+    def __init__(
+        self,
+        config: RetNetConfig,
+        value_factor: int = 2,
+        gate_fn="swish",
+    ):
+        super().__init__()
+        self.config = config
+        self.factor = value_factor
+        self.embed_dim = config.decoder_embed_dim
+        self.v_dim = config.decoder_embed_dim * value_factor
+        self.num_heads = config.decoder_retention_heads
+        self.key_dim = self.embed_dim // self.num_heads
+        self.head_dim = self.v_dim // self.num_heads
+        self.scaling = self.key_dim**-0.5
+
+        self.gate_fn = get_activation_fn(activation=str(gate_fn))
+
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        self.v_proj = nn.Linear(self.embed_dim, self.v_dim, bias=True)
+        self.g_proj = nn.Linear(self.embed_dim, self.v_dim, bias=True)
+
+        self.out_proj = nn.Linear(self.v_dim, self.embed_dim, bias=True)
+
+        self.group_norm = nn.LayerNorm(self.head_dim, eps=1e-6, elementwise_affine=False)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.q_proj.weight, gain=2**-2.5)
+        nn.init.xavier_uniform_(self.k_proj.weight, gain=2**-2.5)
+        nn.init.xavier_uniform_(self.v_proj.weight, gain=2**-2.5)
+        nn.init.xavier_uniform_(self.g_proj.weight, gain=2**-2.5)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        nn.init.constant_(self.out_proj.bias, 0.0)
+
     def parallel_retention(self, q, k, v, decay_mask):
         """
         q,  # bsz * num_head * len * qk_dim
@@ -162,31 +197,50 @@ class MultiScaleRetention(nn.Module):
         decay_mask,  # (1 or bsz) * num_head * len * len
         """
         # [b, h, t, t]
-        retention = q @ k.transpose(-1, -2) * k.size(-1)**-0.5  # (scaled dot-product)
+        retention = q @ k.transpose(-1, -2) * self.scaling  # (scaled dot-product)
         retention = retention * decay_mask
-        output = retention @ v
 
-        # kv cache
-        current_kv = k.unsqueeze(-1) * v.unsqueeze(-2)
-        # [bsz, num_head, qk_dim, v_dim]
+        # invariant after normalization
+        retention = retention / retention.detach().sum(dim=-1, keepdim=True).abs().clamp(min=1)
+
+        output = retention @ v  # [b, h, t, v_dim / h]
+
+        # kv cache: [b, h, t, v_dim, qk_dim]
+        current_kv = k.unsqueeze(-2) * v.unsqueeze(-1)
         intra_decay = decay_mask[:, :, -1, :, None, None]
-        current_kv = (current_kv * intra_decay).sum(2)
-        return output, current_kv, retention
+        current_kv = (current_kv * intra_decay).sum(2)  # [b, h, v_dim, qk_dim]
+        scale = torch.ones(1, self.num_heads, 1, 1, device=q.device)  # TODO: implement correctly
+        cache = {"prev_key_value": current_kv, "scale": scale}
+        return output, cache, retention
 
-    def recurrent_retention(self, q, k, v, past_key_value=None, decay=None, retention_mask=None):
+    def recurrent_retention(self, q, k, v, decay, past_key_value=None, retention_mask=None):
         """
         q, k, v, # bsz * num_head * 1 * qkv_dim
-        past_key_value, # bsz * num_head * qk_dim * v_dim
-        decay # num_head * 1 * 1
+        past_key_value:
+            - "prev_key_value"  # bsz * num_head * v_dim * qk_dim
+            - "scale"  # (1 or bsz) * num_head * 1 * 1
+        decay # (1 or bsz) * num_head * 1 * 1
         retention_mask # bsz * 1
         """
-        past_key_value = past_key_value if past_key_value is not None else 0
-        decay = decay if decay is not None else 0
         retention_mask = retention_mask.view(-1, 1, 1, 1) if retention_mask is not None else 1
-        # (b, h, d_k, d_v)
-        current_kv = decay * past_key_value + retention_mask * (k.transpose(-1, -2) @ v)
-        output = q @ current_kv * k.size(-1)**-0.5  # (b, h, 1, d_v)
-        return output, current_kv
+        # (b, h, v_dim, qk_dim)
+        current_kv = k * v.transpose(-1, -2) * self.scaling
+
+        if past_key_value is not None and "prev_key_value" in past_key_value:
+            prev_kv = past_key_value["prev_key_value"]
+            prev_scale = past_key_value["scale"]
+            scale = prev_scale * decay + 1
+            # connect prev_kv and current_kv
+            prev_kv *= (prev_scale.sqrt() * decay / scale.sqrt())
+            current_kv /= scale.sqrt()
+            current_kv = prev_kv + retention_mask * current_kv
+        else:
+            scale = torch.ones_like(decay)
+
+        output = torch.sum(q * current_kv, dim=3).unsqueeze(2)  # (b, h, 1, d_v)
+
+        cache = {"prev_key_value": current_kv, "scale": scale}
+        return output, cache
 
     def chunkwise_retention(self,
                             q,
@@ -203,6 +257,8 @@ class MultiScaleRetention(nn.Module):
         chunk_decay,  # 1 * num_head * 1 * 1
         inner_decay,  # 1 * num_head * chunk_size * 1
         """
+        # TODO: implement
+        raise NotImplementedError
         # [bsz, num_head, chunk_size, chunk_size]
         retention = q @ k.transpose(-1, -2) * k.size(-1)**-0.5
         retention = retention * decay_mask
@@ -229,43 +285,45 @@ class MultiScaleRetention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        rel_pos: Tuple[Tuple[torch.Tensor]],
         retention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         forward_impl: str = 'parallel',
-        sequence_offset: Optional[int] = 0,
         recurrent_chunk_size: Optional[int] = None,
         output_retentions: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
         B, T, H = hidden_states.size()
-        q, k, v = self.qkv(hidden_states).split([self.embed_dim, self.embed_dim, self.v_dim],
-                                                dim=-1)
-        q, k = self.xpos.rotate_queries_and_keys(q, k, offset=sequence_offset)
+        (sin, cos), decay_mask = rel_pos
+        # projections
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+        g = self.g_proj(hidden_states)
+        # multi-head
         q, k, v = split_heads((q, k, v), B, T, self.num_heads)
+        # rotate
+        qr = theta_shift(q, sin, cos)
+        kr = theta_shift(k, sin, cos)
+
         # retention
         if forward_impl == 'parallel':
-            decay_mask = self.get_parallel_decay_mask(T, retention_mask=retention_mask)
-            retention_out, curr_kv, retention_weights = self.parallel_retention(q, k, v, decay_mask)
+            retention_out, curr_kv, retention_weights = self.parallel_retention(
+                qr, kr, v, decay_mask)
         elif forward_impl == 'recurrent':
-            decay = self.get_recurrent_decay()
-            retention_out, curr_kv = self.recurrent_retention(q,
-                                                              k,
+            retention_out, curr_kv = self.recurrent_retention(qr,
+                                                              kr,
                                                               v,
+                                                              decay_mask,
                                                               past_key_value=past_key_value,
-                                                              decay=decay,
                                                               retention_mask=retention_mask)
         elif forward_impl == 'chunkwise':
-            assert recurrent_chunk_size is not None
-            q_chunks, k_chunks, v_chunks = split_chunks(q, k, v, size=recurrent_chunk_size, dim=2)
-            if retention_mask is not None:
-                retention_mask_chunks = split_chunks(retention_mask,
-                                                     size=recurrent_chunk_size,
-                                                     dim=1)[0]
+            if recurrent_chunk_size is None:
+                recurrent_chunk_size = self.config.recurrent_chunk_size
+
+            q_chunks, k_chunks, v_chunks = split_chunks(qr, kr, v, size=recurrent_chunk_size, dim=2)
             ret_chunks = []
             for i, (_q, _k, _v) in enumerate(zip(q_chunks, k_chunks, v_chunks)):
-                csz = _q.size(2)
-                ret_mask = retention_mask_chunks[i] if retention_mask is not None else None
-                decay_mask, chunk_decay, inner_decay = self.get_chunkwise_decay(
-                    csz, retention_mask=ret_mask)
+                decay_mask, chunk_decay, inner_decay = decay_mask
                 out_chunk, past_key_value = self.chunkwise_retention(_q,
                                                                      _k,
                                                                      _v,
@@ -279,15 +337,15 @@ class MultiScaleRetention(nn.Module):
             curr_kv = past_key_value
         else:
             raise ValueError(f'forward_impl {forward_impl} not supported.')
-        # concaat heads
-        retention_out = retention_out.transpose(1, 2).contiguous().view(B, T, self.v_dim)
-        # group norm (merge batch, length dimension -> group norm -> split back)
-        normed = self.gn(retention_out.view(B * T, self.v_dim))
-        normed = normed.view(B, T, self.v_dim)
-        # out gate & proj
-        out = self.silu(self.gated(hidden_states)) * normed
 
-        outputs = (self.proj(out), curr_kv)
+        # concaat heads
+        retention_out = retention_out.transpose(1, 2)
+        normed = self.group_norm(retention_out).reshape(B, T, self.v_dim)
+        # out gate & proj
+        out = self.gate_fn(g) * normed
+        out = self.out_proj(out)
+
+        outputs = (out, curr_kv)
         if output_retentions:
             outputs += (retention_weights,) if forward_impl == 'parallel' else (None,)
         return outputs
@@ -396,13 +454,10 @@ class RetNetDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        incremental_state=None,
-        chunkwise_recurrent=False,
-        retention_rel_pos=None,
+        retention_rel_pos: Tuple[Tuple[torch.Tensor]],
         retention_mask: Optional[torch.Tensor] = None,
         forward_impl: str = 'parallel',
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        sequence_offset: Optional[int] = 0,
         recurrent_chunk_size: Optional[int] = None,
         output_retentions: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
@@ -410,18 +465,11 @@ class RetNetDecoderLayer(nn.Module):
         if self.normalize_before:
             hidden_states = self.retention_layer_norm(hidden_states)
 
-        # TODO: resolve this by using the same interface as the original RetNet
-        # hidden_states = self.retention(
-        #     hidden_states,
-        #     incremental_state=incremental_state,
-        #     rel_pos=retention_rel_pos,
-        #     chunkwise_recurrent=chunkwise_recurrent,
-        # )
         msr_outs = self.retention(hidden_states,
+                                  retention_rel_pos,
                                   retention_mask=retention_mask,
                                   past_key_value=past_key_value,
                                   forward_impl=forward_impl,
-                                  sequence_offset=sequence_offset,
                                   recurrent_chunk_size=recurrent_chunk_size,
                                   output_retentions=output_retentions)
         hidden_states = msr_outs[0]
@@ -491,9 +539,9 @@ class RetNetOutputWithPast(ModelOutput):
 
             If `past_key_values` is used only the last hidden-state of the sequences of shape `(batch_size, 1,
             decoder_embed_dim)` is output.
-        past_key_values (`tuple(torch.FloatTensor)`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-            Tuple of `torch.FloatTensor` of length `config.n_layers`, with each tensor of shape
-            `(batch_size, num_heads, qk_dim, v_dim)`.
+        past_key_values (`List(Dict(str, torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            - "prev_key_value": shape=(bsz * num_head * v_dim * qk_dim)
+            - "scale": shape=((1 or bsz) * num_head * 1 * 1)
 
             Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
             that can be used (see `past_key_values` input) to speed up sequential decoding.
@@ -510,7 +558,7 @@ class RetNetOutputWithPast(ModelOutput):
     """
 
     last_hidden_state: torch.FloatTensor = None
-    past_key_values: Optional[Tuple[torch.FloatTensor]] = None
+    past_key_values: Optional[List[Dict[str, torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     retentions: Optional[Tuple[torch.FloatTensor]] = None
 
@@ -549,7 +597,6 @@ class RetNetModel(RetNetPreTrainedModel):
             self.layer_norm = None
 
         self.retnet_rel_pos = RetNetRelPos(config)
-        self.chunkwise_recurrent = config.chunkwise_recurrent
         self.recurrent_chunk_size = config.recurrent_chunk_size
 
         if config.deepnorm:
@@ -577,9 +624,9 @@ class RetNetModel(RetNetPreTrainedModel):
         self,
         input_ids,
         inputs_embeds=None,
-        incremental_state=None,
+        past_key_values=None,
     ):
-        if incremental_state is not None and not self.is_first_step(incremental_state):
+        if past_key_values is not None and not self.is_first_step(past_key_values):
             input_ids = input_ids[:, -1:]
 
         if inputs_embeds is None:
@@ -594,25 +641,23 @@ class RetNetModel(RetNetPreTrainedModel):
 
         return embed
 
-    def is_first_step(self, incremental_state):
-        if incremental_state is None:
+    def is_first_step(self, past_key_values):
+        if past_key_values is None:
             return False
-        return incremental_state.get("is_first_step", False)
+        return past_key_values.get("is_first_step", False)
 
     def forward(
         self,
-        incremental_state=None,  # TODO: merge with past_key_values
         input_ids: torch.LongTensor = None,
         retention_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[List[Dict[str, torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         output_retentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         use_cache: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = 'parallel',
-        sequence_offset: Optional[int] = 0,
         recurrent_chunk_size: Optional[int] = None,
     ) -> Union[Tuple, RetNetOutputWithPast]:
 
@@ -638,7 +683,7 @@ class RetNetModel(RetNetPreTrainedModel):
 
         # embed tokens
         if inputs_embeds is None:
-            inputs_embeds = self.forward_embedding(input_ids, inputs_embeds, incremental_state)
+            inputs_embeds = self.forward_embedding(input_ids, inputs_embeds, past_key_values)
 
         if retention_mask is None:
             if attention_mask is not None:
@@ -649,10 +694,10 @@ class RetNetModel(RetNetPreTrainedModel):
                                             dtype=torch.bool,
                                             device=inputs_embeds.device)
 
-        is_first_step = self.is_first_step(incremental_state)
+        is_first_step = self.is_first_step(past_key_values)
         hidden_states = inputs_embeds
 
-        need_pad_for_chunkwise = (self.chunkwise_recurrent and
+        need_pad_for_chunkwise = (forward_impl == 'chunkwise' and
                                   seq_length % self.recurrent_chunk_size != 0)
         if need_pad_for_chunkwise:
             padding_len = self.recurrent_chunk_size - seq_length % self.recurrent_chunk_size
@@ -662,8 +707,8 @@ class RetNetModel(RetNetPreTrainedModel):
             slen = seq_length
         # relative position
         retention_rel_pos = self.retnet_rel_pos(slen,
-                                                incremental_state is not None and not is_first_step,
-                                                chunkwise_recurrent=self.chunkwise_recurrent)
+                                                past_key_values is not None and not is_first_step,
+                                                forward_impl=forward_impl)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -672,13 +717,13 @@ class RetNetModel(RetNetPreTrainedModel):
         next_decoder_cache = () if use_cache else None
 
         for idx, layer in enumerate(self.layers):
-            if incremental_state is None or is_first_step:
-                if is_first_step and incremental_state is not None:
-                    if idx not in incremental_state:
-                        incremental_state[idx] = {}
+            if past_key_values is None or is_first_step:
+                if is_first_step and past_key_values is not None:
+                    if idx not in past_key_values:
+                        past_key_values[idx] = {}
             else:
-                if idx not in incremental_state:
-                    incremental_state[idx] = {}
+                if idx not in past_key_values:
+                    past_key_values[idx] = {}
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -689,31 +734,24 @@ class RetNetModel(RetNetPreTrainedModel):
                 def create_custom_forward(module):
 
                     def custom_forward(*inputs):
-                        return module(*inputs, sequence_offset, recurrent_chunk_size,
-                                      output_retentions)
+                        return module(*inputs, recurrent_chunk_size, output_retentions)
 
                     return custom_forward
 
                 block_outputs = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(layer),
                     hidden_states,
-                    incremental_state[idx] if incremental_state is not None else None,
                     retention_rel_pos,
-                    self.chunkwise_recurrent,
                     retention_mask,
                     forward_impl,
                     past_key_value,
                 )
             else:
                 block_outputs = layer(hidden_states,
-                                      incremental_state=incremental_state[idx]
-                                      if incremental_state is not None else None,
-                                      retention_rel_pos=retention_rel_pos,
-                                      chunkwise_recurrent=self.chunkwise_recurrent,
+                                      retention_rel_pos,
                                       retention_mask=retention_mask,
                                       forward_impl=forward_impl,
                                       past_key_value=past_key_value,
-                                      sequence_offset=sequence_offset,
                                       recurrent_chunk_size=recurrent_chunk_size,
                                       output_retentions=output_retentions)
 
@@ -758,9 +796,9 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
             Language modeling loss (for next-token prediction).
         logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
             Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        past_key_values (`tuple(torch.FloatTensor)`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-            Tuple of `torch.FloatTensor` of length `config.n_layers`, with each tensor of shape
-            `(batch_size, num_heads, qk_dim, v_dim)`.
+        past_key_values (`List(Dict(str, torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            - "prev_key_value": shape=(bsz * num_head * v_dim * qk_dim)
+            - "scale": shape=((1 or bsz) * num_head * 1 * 1)
 
             Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
             that can be used (see `past_key_values` input) to speed up sequential decoding.
@@ -778,7 +816,7 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
 
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
-    past_key_values: Optional[Tuple[torch.FloatTensor]] = None
+    past_key_values: Optional[List[Dict[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     retentions: Optional[Tuple[torch.FloatTensor]] = None
 

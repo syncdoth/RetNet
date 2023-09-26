@@ -35,7 +35,6 @@ class RetNetConfig(PretrainedConfig):
             decoder_normalize_before: bool = True,  # apply layernorm before each decoder block
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = False,  # if True, dont scale embeddings
-            chunkwise_recurrent: bool = False,
             recurrent_chunk_size: int = 512,
             deepnorm: bool = False,
             subln: bool = True,
@@ -60,9 +59,8 @@ class RetNetConfig(PretrainedConfig):
         self.subln = subln
         self.layernorm_eps = layernorm_eps
         # Blockwise
-        self.chunkwise_recurrent = chunkwise_recurrent
         self.recurrent_chunk_size = recurrent_chunk_size
-        self.forward_impl = forward_impl  # TODO: merge this and chunkwise_recurrent
+        self.forward_impl = forward_impl
 
         if self.deepnorm:
             self.decoder_normalize_before = False
