@@ -289,7 +289,6 @@ class MultiScaleRetention(nn.Module):
         output = inner_output / align_inner_scale + cross_output / align_cross_scale
         output = output.transpose(2, 3)  # [b, n_c, t_c, h, v_dim]
 
-        # TODO: double check if this is correct
         cache = {"prev_key_value": kv_state.transpose(-2, -1), "scale": decay_scale}
         return output, cache
 
@@ -795,19 +794,19 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
 
 
 class RetNetModelWithLMHead(RetNetPreTrainedModel):
-    # TODO
-    def __init__(self, config: RetNetConfig) -> None:
+
+    def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None) -> None:
         super().__init__(config)
-        self.model = RetNetModel(config)
+        self.model = RetNetModel(config, embed_tokens=embed_tokens)
         self.lm_head = nn.Linear(config.decoder_embed_dim, config.vocab_size, bias=False)
 
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.model.embedding
+        return self.model.embed_tokens
 
     def set_input_embeddings(self, value):
-        self.model.embedding = value
+        self.model.embed_tokens = value
 
     def get_output_embeddings(self):
         return self.lm_head
@@ -910,7 +909,6 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
         if retention_mask is None and attention_mask is not None:
             retention_mask = attention_mask
 
-        generated = []
         if input_ids is not None:
             if input_ids.shape[1] == 1:
                 past_key_values = None
@@ -925,30 +923,28 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
             else:
                 past_key_values = None
                 for p_i in range(input_ids.shape[1] - 1):
+                    # TODO: double check ret_mask implementation
                     ret_mask = retention_mask[:,
                                               p_i:p_i + 1] if retention_mask is not None else None
-                    outputs = self(input_ids[:, p_i:p_i + 1],
+                    outputs = self(input_ids[:, :p_i + 1],
                                    retention_mask=ret_mask,
                                    forward_impl='recurrent',
                                    past_key_values=past_key_values,
-                                   sequence_offset=p_i,
                                    return_dict=True,
                                    use_cache=True)
                     past_key_values = outputs.past_key_values
-            token = input_ids[:, -1].unsqueeze(-1)  # [B, 1]
-            prompt_len = input_ids.shape[1] - 1
+
+            generated = input_ids[:, -1].unsqueeze(-1)  # [B, 1]
         else:
-            prompt_len = 0
-            token = torch.tensor([[bos_token_id]]).to(self.lm_head.weight.device)
+            generated = torch.tensor([[bos_token_id]]).to(self.lm_head.weight.device)
             past_key_values = None
 
         for i in range(max_new_tokens):
-            outputs = self(token,
+            outputs = self(generated,
                            forward_impl='recurrent',
                            past_key_values=past_key_values,
                            use_cache=True,
-                           return_dict=True,
-                           sequence_offset=prompt_len + i)
+                           return_dict=True)
             logit = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
             past_key_values = outputs.past_key_values
             token = self.sample_token(logit,
@@ -956,8 +952,7 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
                                       top_k=top_k,
                                       top_p=top_p,
                                       temperature=temperature)
-            generated.append(token)
+            generated = torch.cat([generated, token], dim=-1)
             if early_stopping and (token == eos_token_id).all():
                 break
-        generated = torch.cat(generated, dim=-1)
         return generated
