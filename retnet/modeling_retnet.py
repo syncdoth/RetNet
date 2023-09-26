@@ -64,32 +64,42 @@ class MultiScaleRetention(nn.Module):
         gamma = 1 - torch.exp(torch.linspace(s, e, self.num_heads))  # [h,]
         self.decay = nn.Parameter(gamma, requires_grad=False)
 
-    def get_parallel_decay_mask(self, length, retention_mask=None):
+    def get_parallel_decay_mask(self, length, retention_mask=None, return_scale=False):
         range_tensor = torch.arange(length, device=self.decay.device)
         range_tensor = range_tensor[None, :, None].expand(self.num_heads, length, 1)
         exponent = range_tensor - range_tensor.transpose(-1, -2)
-        decay_mask = self.decay.view(-1, 1, 1)**exponent
+        decay_mask = torch.exp(self.decay.view(-1, 1, 1) * exponent)  # FIX 1
         decay_mask = torch.tril(decay_mask, diagonal=0)  # [h, t, t]
+        # FIX 2: rescale
+        scale = decay_mask.sum(dim=-1, keepdim=True).sqrt()
+        decay_mask = decay_mask / scale
+        decay_mask = decay_mask.unsqueeze(0)
         if retention_mask is not None:
             retention_mask = retention_mask.float().view(-1, 1, 1, length)
-            decay_mask = decay_mask.unsqueeze(0) * retention_mask
-        else:
-            decay_mask = decay_mask.unsqueeze(0)
+            decay_mask *= retention_mask
+
+        if return_scale:
+            return decay_mask, scale.unsqueeze(0)
         return decay_mask
 
     def get_recurrent_decay(self):
         decay = self.decay.view(1, self.num_heads, 1, 1)
-        return decay
+        return decay.exp()
 
-    def get_chunkwise_decay(self, chunk_size, retention_mask=None):
+    def get_chunkwise_decay(self, retention_mask=None):
+        chunk_size = self.config.recurrent_chunk_size
         # within chunk decay
-        decay_mask = self.get_parallel_decay_mask(chunk_size, retention_mask=retention_mask)
+        decay_mask, scale = self.get_parallel_decay_mask(chunk_size,
+                                                         retention_mask=retention_mask,
+                                                         return_scale=True)
         # decay of the chunk
-        chunk_decay = self.decay.view(1, self.num_heads, 1, 1)**chunk_size
+        chunk_decay = torch.exp(self.decay.view(1, self.num_heads, 1, 1) * chunk_size)  # FIX 1
         # cross-chunk decay
         exponent = torch.arange(chunk_size, dtype=torch.float,
                                 device=decay_mask.device).unsqueeze(0) + 1
-        inner_decay = (self.decay.unsqueeze(-1)**exponent).view(1, self.num_heads, chunk_size, 1)
+        inner_decay = torch.exp(self.decay.unsqueeze(-1) * exponent)
+        inner_decay = inner_decay.view(1, self.num_heads, chunk_size,
+                                       1) / (scale / scale[:, :, -1, None])
         return decay_mask, chunk_decay, inner_decay
 
     def parallel_retention(self, q, k, v, decay_mask):
