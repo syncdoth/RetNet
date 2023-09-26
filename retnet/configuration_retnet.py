@@ -23,12 +23,12 @@ class RetNetConfig(PretrainedConfig):
             output_retentions: bool = False,
             use_cache: bool = True,
             forward_impl: str = 'parallel',
-            ################from torchscale################
             activation_fn: str = "gelu",
             dropout: float = 0.0,  # dropout probability
             activation_dropout: float = 0.0,  # dropout probability after activation in FFN.
             drop_path_rate: float = 0.0,
             decoder_embed_dim: int = 768,  # decoder embedding dimension
+            value_factor: int = 2,
             decoder_ffn_embed_dim: int = 1536,  # decoder embedding dimension for FFN
             decoder_layers: int = 12,  # num decoder layers
             decoder_retention_heads: int = 2,  # num decoder retention heads
@@ -43,11 +43,13 @@ class RetNetConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
         self.output_retentions = output_retentions
-        # copied from torchscale repo
+        # size related
         self.decoder_embed_dim = decoder_embed_dim
+        self.value_factor = value_factor
         self.decoder_retention_heads = decoder_retention_heads
         self.decoder_ffn_embed_dim = decoder_ffn_embed_dim
         self.decoder_layers = decoder_layers
+        # normalization related
         self.decoder_normalize_before = decoder_normalize_before
         self.activation_fn = activation_fn
         self.dropout = dropout

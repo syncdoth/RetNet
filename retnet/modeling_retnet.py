@@ -431,7 +431,7 @@ class RetNetDecoderLayer(nn.Module):
 
         self.retention = MultiScaleRetention(
             config,
-            value_factor=2,  # TODO
+            value_factor=config.value_factor,
         )
 
         self.normalize_before = config.decoder_normalize_before
