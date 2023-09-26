@@ -14,7 +14,6 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from .configuration_retnet import RetNetConfig
-from .xpos_relative_position import XPOS
 
 logger = logging.get_logger(__name__)
 
