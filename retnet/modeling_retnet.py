@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from transformers import top_k_top_p_filtering
@@ -27,6 +28,15 @@ def split_heads(tensors, bsz, seqlen, num_heads):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def get_activation_fn(activation):
+    if activation == "relu":
+        return F.relu
+    elif activation == "gelu":
+        return F.gelu
+    else:
+        raise NotImplementedError
 
 
 class MultiScaleRetention(nn.Module):
@@ -218,6 +228,47 @@ class MultiScaleRetention(nn.Module):
         return outputs
 
 
+class FeedForwardNetwork(nn.Module):
+
+    def __init__(
+        self,
+        embed_dim,
+        ffn_dim,
+        activation_fn,
+        dropout,
+        activation_dropout,
+        layernorm_eps,
+        subln=False,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.activation_fn = get_activation_fn(activation=str(activation_fn))
+        self.activation_dropout_module = torch.nn.Dropout(activation_dropout)
+        self.dropout_module = torch.nn.Dropout(dropout)
+        self.fc1 = nn.Linear(self.embed_dim, ffn_dim)
+        self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
+        self.ffn_layernorm = nn.LayerNorm(ffn_dim, eps=layernorm_eps) if subln else None
+
+    def reset_parameters(self):
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()
+        if self.ffn_layernorm is not None:
+            self.ffn_layernorm.reset_parameters()
+
+    def forward(self, x):
+        x_shape = x.shape
+        x = x.reshape(-1, x.size(-1))
+        x = self.fc1(x)
+        x = self.activation_fn(x.float()).type_as(x)
+        x = self.activation_dropout_module(x)
+        if self.ffn_layernorm is not None:
+            x = self.ffn_layernorm(x)
+        x = self.fc2(x)
+        x = x.view(x_shape)
+        x = self.dropout_module(x)
+        return x
+
+
 class RetNetBlock(nn.Module):
 
     def __init__(self, config: RetNetConfig):
@@ -225,11 +276,13 @@ class RetNetBlock(nn.Module):
         self.config = config
         self.msr = MultiScaleRetention(config)
 
-        self.ffn = nn.Sequential(
-            nn.Linear(config.decoder_embed_dim, config.decoder_ffn_embed_dim),
-            nn.GELU(),
-            nn.Linear(config.decoder_ffn_embed_dim, config.decoder_embed_dim),
-        )
+        self.ffn = FeedForwardNetwork(config.decoder_embed_dim,
+                                      config.decoder_ffn_embed_dim,
+                                      config.activation_fn,
+                                      config.dropout,
+                                      config.activation_dropout,
+                                      config.layernorm_eps,
+                                      subln=config.subln)
         self.ln1 = nn.LayerNorm(config.decoder_embed_dim)
         self.ln2 = nn.LayerNorm(config.decoder_embed_dim)
 
