@@ -311,11 +311,9 @@ class MultiScaleRetention(nn.Module):
         q, k, v = split_heads((q, k, v), B, T, self.num_heads)
         k = k * self.scaling  # for scaled dot product
         # rotate
-        # TODO: theta_shift has problem with recurrent
-        # qr = theta_shift(q, sin, cos)
-        # kr = theta_shift(k, sin, cos)
-        qr = q
-        kr = k
+        # NOTE: theta_shift has bug with mps device.
+        qr = theta_shift(q, sin, cos)
+        kr = theta_shift(k, sin, cos)
 
         # retention
         if forward_impl == 'parallel':
