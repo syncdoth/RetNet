@@ -1,9 +1,12 @@
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from timm.models.layers import drop_path
 from torch import nn
 from transformers import top_k_top_p_filtering
 from transformers.modeling_outputs import ModelOutput
@@ -269,26 +272,71 @@ class FeedForwardNetwork(nn.Module):
         return x
 
 
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
+
+    def __init__(self, drop_prob=None):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        return drop_path(x, self.drop_prob, self.training)
+
+    def extra_repr(self):
+        return "p={}".format(self.drop_prob)
+
+
 class RetNetDecoderLayer(nn.Module):
 
-    def __init__(self, config: RetNetConfig):
+    def __init__(self, config: RetNetConfig, depth: int):
         super().__init__()
         self.config = config
-        self.msr = MultiScaleRetention(config)
+        self.embed_dim = config.decoder_embed_dim
+        self.dropout_module = torch.nn.Dropout(config.dropout)
 
-        self.ffn = FeedForwardNetwork(config.decoder_embed_dim,
-                                      config.decoder_ffn_embed_dim,
-                                      config.activation_fn,
-                                      config.dropout,
-                                      config.activation_dropout,
-                                      config.layernorm_eps,
-                                      subln=config.subln)
-        self.ln1 = nn.LayerNorm(config.decoder_embed_dim)
-        self.ln2 = nn.LayerNorm(config.decoder_embed_dim)
+        if config.drop_path_rate > 0:
+            drop_path_prob = np.linspace(0, config.drop_path_rate, config.decoder_layers)[depth]
+            self.drop_path = DropPath(drop_path_prob)
+        else:
+            self.drop_path = None
+
+        self.retention = MultiScaleRetention(
+            config,
+            value_factor=2,  # TODO
+        )
+
+        self.normalize_before = config.decoder_normalize_before
+
+        self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+
+        self.ffn_dim = config.decoder_ffn_embed_dim
+
+        self.ffn = FeedForwardNetwork(
+            self.embed_dim,
+            self.ffn_dim,
+            self.config.activation_fn,
+            self.config.dropout,
+            self.config.activation_dropout,
+            self.config.layernorm_eps,
+            self.config.subln,
+        )
+
+        self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+
+        if config.deepnorm:
+            self.alpha = math.pow(2.0 * config.decoder_layers, 0.25)
+        else:
+            self.alpha = 1.0
+
+    def residual_connection(self, x, residual):
+        return residual * self.alpha + x
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        incremental_state=None,
+        chunkwise_recurrent=False,
+        retention_rel_pos=None,
         retention_mask: Optional[torch.Tensor] = None,
         forward_impl: str = 'parallel',
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -296,20 +344,50 @@ class RetNetDecoderLayer(nn.Module):
         recurrent_chunk_size: Optional[int] = None,
         output_retentions: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
+        residual = hidden_states
+        if self.normalize_before:
+            hidden_states = self.retention_layer_norm(hidden_states)
 
-        msr_outs = self.msr(self.ln1(hidden_states),
+        # TODO: resolve this by using the same interface as the original RetNet
+        # hidden_states = self.retention(
+        #     hidden_states,
+        #     incremental_state=incremental_state,
+        #     rel_pos=retention_rel_pos,
+        #     chunkwise_recurrent=chunkwise_recurrent,
+        # )
+        msr_outs = self.msr(hidden_states,
                             retention_mask=retention_mask,
                             past_key_value=past_key_value,
                             forward_impl=forward_impl,
                             sequence_offset=sequence_offset,
                             recurrent_chunk_size=recurrent_chunk_size,
                             output_retentions=output_retentions)
-        msr = msr_outs[0]
+        hidden_states = msr_outs[0]
         curr_kv = msr_outs[1]
-        y = hidden_states + msr
-        y = y + self.ffn(self.ln2(y))
 
-        outputs = (y, curr_kv)
+        hidden_states = self.dropout_module(hidden_states)
+
+        if self.drop_path is not None:
+            hidden_states = self.drop_path(hidden_states)
+
+        hidden_states = self.residual_connection(hidden_states, residual)
+        if not self.normalize_before:
+            hidden_states = self.retention_layer_norm(hidden_states)
+
+        residual = hidden_states
+        if self.normalize_before:
+            hidden_states = self.final_layer_norm(hidden_states)
+
+        hidden_states = self.ffn(hidden_states)
+
+        if self.drop_path is not None:
+            hidden_states = self.drop_path(hidden_states)
+
+        hidden_states = self.residual_connection(hidden_states, residual)
+        if not self.normalize_before:
+            hidden_states = self.final_layer_norm(hidden_states)
+
+        outputs = (hidden_states, curr_kv)
 
         if output_retentions:
             outputs += (msr_outs[2],)
@@ -345,7 +423,7 @@ class RetNetOutputWithPast(ModelOutput):
     """
     class for RetNet model's outputs that may also contain a past key/values (to speed up sequential decoding).
 
-    Args:
+    config:
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, decoder_embed_dim)`):
             Sequence of hidden-states at the output of the last layer of the model.
 
@@ -508,7 +586,7 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
     """
     class for RetNet causal language model (or autoregressive) outputs.
 
-    Args:
+    config:
         loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
             Language modeling loss (for next-token prediction).
         logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
