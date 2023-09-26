@@ -72,8 +72,14 @@ class RetNetRelPos(nn.Module):
         self.register_buffer("decay", decay)
         self.recurrent_chunk_size = config.recurrent_chunk_size
 
-    def forward(self, slen, forward_impl='parallel'):
+    def forward(self,
+                slen,
+                forward_impl='parallel',
+                recurrent_chunk_size=None,
+                retention_mask=None):
         # TODO: handle retention mask
+        if recurrent_chunk_size:
+            recurrent_chunk_size = self.recurrent_chunk_size
         if forward_impl == 'recurrent':
             sin = torch.sin(self.angle * (slen - 1))
             cos = torch.cos(self.angle * (slen - 1))
@@ -83,9 +89,8 @@ class RetNetRelPos(nn.Module):
             sin = torch.sin(index[:, None] * self.angle[None, :])
             cos = torch.cos(index[:, None] * self.angle[None, :])
 
-            block_index = torch.arange(self.recurrent_chunk_size).to(self.decay)
-            mask = torch.tril(
-                torch.ones(self.recurrent_chunk_size, self.recurrent_chunk_size).to(self.decay))
+            block_index = torch.arange(recurrent_chunk_size).to(self.decay)
+            mask = torch.tril(torch.ones(recurrent_chunk_size, recurrent_chunk_size).to(self.decay))
             mask = torch.masked_fill(block_index[:, None] - block_index[None, :], ~mask.bool(),
                                      float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
@@ -93,7 +98,7 @@ class RetNetRelPos(nn.Module):
             scale = mask.sum(dim=-1, keepdim=True).sqrt()
             mask = mask / scale
 
-            cross_decay = torch.exp(self.decay * self.recurrent_chunk_size)
+            cross_decay = torch.exp(self.decay * recurrent_chunk_size)
             inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
             cross_decay = cross_decay[:, None, None]
             inner_decay = inner_decay[:, :, None] / (scale / scale[:, -1, None])
@@ -152,7 +157,7 @@ class RetNetRelPos(nn.Module):
 
 
 class MultiScaleRetention(nn.Module):
-    # TODO: normalization to decay in the paper
+
     def __init__(
         self,
         config: RetNetConfig,
@@ -242,45 +247,67 @@ class MultiScaleRetention(nn.Module):
         cache = {"prev_key_value": current_kv, "scale": scale}
         return output, cache
 
-    def chunkwise_retention(self,
-                            q,
-                            k,
-                            v,
-                            decay_mask,
-                            past_key_value=None,
-                            chunk_decay=None,
-                            inner_decay=None):
+    def chunkwise_retention(self, q, k, v, decay_mask):
         """
-        q, k, v,  # bsz * num_head * chunk_size * qkv_dim
-        past_key_value,  # bsz * num_head * qk_dim * v_dim
+        q, k, v,  # bsz * num_head * seqlen * qkv_dim
+        past_key_value:
+            - "prev_key_value"  # bsz * num_head * v_dim * qk_dim
+            - "scale"  # (1 or bsz) * num_head * 1 * 1
         decay_mask,  # 1 * num_head * chunk_size * chunk_size
         chunk_decay,  # 1 * num_head * 1 * 1
         inner_decay,  # 1 * num_head * chunk_size * 1
         """
-        # TODO: implement
-        raise NotImplementedError
-        # [bsz, num_head, chunk_size, chunk_size]
-        retention = q @ k.transpose(-1, -2) * k.size(-1)**-0.5
-        retention = retention * decay_mask
-        inner_retention = retention @ v  # [bsz, num_head, chunk_size, v_dim]
+        decay_mask, chunk_decay, inner_decay = decay_mask
+        bsz, _, tgt_len, _ = v.size()
+        chunk_len = decay_mask.size(-1)
+        assert tgt_len % chunk_len == 0
+        num_chunks = tgt_len // chunk_len
 
-        if past_key_value is None:
-            cross_retention = 0
-            past_chunk = 0
-        else:
-            cross_retention = (q @ past_key_value) * inner_decay * k.size(-1)**-0.5
-            past_chunk = chunk_decay * past_key_value
+        # [b, n_c, h, t_c, qkv_dim]
+        q = q.view(bsz, self.num_heads, num_chunks, chunk_len, self.key_dim).transpose(1, 2)
+        k = k.view(bsz, self.num_heads, num_chunks, chunk_len, self.key_dim).transpose(1, 2)
+        v = v.view(bsz, self.num_heads, num_chunks, chunk_len, self.head_dim).transpose(1, 2)
 
-        # [bsz, num_head, chunk_size, v_dim]
-        retention = inner_retention + cross_retention
-        # [bsz, num_head, chunk_size, qk_dim, v_dim]
-        current_kv = k.unsqueeze(-1) * v.unsqueeze(-2)
-        # NOTE: intra_decay is omitted in the paper; but this detail is important
-        # [bsz, num_head, qk_dim, v_dim]
-        intra_decay = decay_mask[:, :, -1, :, None, None]
-        current_kv = (current_kv * intra_decay).sum(2)
-        current_kv = past_chunk + current_kv
-        return retention, current_kv
+        k_t = k.transpose(-1, -2)
+
+        qk_mat = q @ k_t * self.scaling  # [b, n_c, h, t_c, t_c]
+        qk_mat = qk_mat * decay_mask.unsqueeze(1)
+        inner_scale = qk_mat.detach().abs().sum(dim=-1, keepdim=True).clamp(min=1)
+        qk_mat = qk_mat / inner_scale
+        # [b, n_c, h, t_c, v_dim]
+        inner_output = torch.matmul(qk_mat, v)
+
+        # reduce kv in one chunk
+        # [b, n_c, h, qkv_dim, v_dim]
+        kv = k_t @ (v * decay_mask[:, None, :, -1, :, None])
+        kv = kv.view(bsz, num_chunks, self.num_heads, self.key_dim, self.head_dim)
+
+        kv_recurrent = []
+        cross_scale = []
+        kv_state = torch.zeros(bsz, self.num_heads, self.key_dim, self.head_dim).to(v)
+        kv_scale = torch.ones(bsz, self.num_heads, 1, 1).to(v)
+
+        # accumulate kv by loop
+        for i in range(num_chunks):
+            kv_recurrent.append(kv_state / kv_scale)
+            cross_scale.append(kv_scale)
+            kv_state = kv_state * chunk_decay + kv[:, i]
+            kv_scale = kv_state.detach().abs().sum(dim=-2, keepdim=True).max(
+                dim=-1, keepdim=True).values.clamp(min=1)
+
+        kv_recurrent = torch.stack(kv_recurrent, dim=1)
+        cross_scale = torch.stack(cross_scale, dim=1)
+
+        all_scale = torch.maximum(inner_scale, cross_scale)
+        align_inner_scale = all_scale / inner_scale
+        align_cross_scale = all_scale / cross_scale
+
+        cross_output = (q * inner_decay.unsqueeze(1)) @ kv_recurrent
+        retention = inner_output / align_inner_scale + cross_output / align_cross_scale
+
+        # TODO: double check if this is correct
+        cache = {"prev_key_value": kv_state.transpose(-2, -1) / kv_scale, "scale": kv_scale}
+        return retention, cache
 
     def forward(
         self,
@@ -289,7 +316,6 @@ class MultiScaleRetention(nn.Module):
         retention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         forward_impl: str = 'parallel',
-        recurrent_chunk_size: Optional[int] = None,
         output_retentions: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
         B, T, H = hidden_states.size()
@@ -317,24 +343,7 @@ class MultiScaleRetention(nn.Module):
                                                               past_key_value=past_key_value,
                                                               retention_mask=retention_mask)
         elif forward_impl == 'chunkwise':
-            if recurrent_chunk_size is None:
-                recurrent_chunk_size = self.config.recurrent_chunk_size
-
-            q_chunks, k_chunks, v_chunks = split_chunks(qr, kr, v, size=recurrent_chunk_size, dim=2)
-            ret_chunks = []
-            for i, (_q, _k, _v) in enumerate(zip(q_chunks, k_chunks, v_chunks)):
-                decay_mask, chunk_decay, inner_decay = decay_mask
-                out_chunk, past_key_value = self.chunkwise_retention(_q,
-                                                                     _k,
-                                                                     _v,
-                                                                     decay_mask,
-                                                                     past_key_value=past_key_value,
-                                                                     chunk_decay=chunk_decay,
-                                                                     inner_decay=inner_decay)
-                ret_chunks.append(out_chunk)
-            # [bsz, num_head, seqlen, v_dim]
-            retention_out = torch.cat(ret_chunks, dim=2)
-            curr_kv = past_key_value
+            retention_out, curr_kv = self.chunkwise_retention(qr, kr, v, decay_mask)
         else:
             raise ValueError(f'forward_impl {forward_impl} not supported.')
 
@@ -458,7 +467,6 @@ class RetNetDecoderLayer(nn.Module):
         retention_mask: Optional[torch.Tensor] = None,
         forward_impl: str = 'parallel',
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        recurrent_chunk_size: Optional[int] = None,
         output_retentions: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
         residual = hidden_states
@@ -470,7 +478,6 @@ class RetNetDecoderLayer(nn.Module):
                                   retention_mask=retention_mask,
                                   past_key_value=past_key_value,
                                   forward_impl=forward_impl,
-                                  recurrent_chunk_size=recurrent_chunk_size,
                                   output_retentions=output_retentions)
         hidden_states = msr_outs[0]
         curr_kv = msr_outs[1]
@@ -697,10 +704,13 @@ class RetNetModel(RetNetPreTrainedModel):
         is_first_step = self.is_first_step(past_key_values)
         hidden_states = inputs_embeds
 
+        # handling chunking here
+        if recurrent_chunk_size is None:
+            recurrent_chunk_size = self.recurrent_chunk_size
         need_pad_for_chunkwise = (forward_impl == 'chunkwise' and
-                                  seq_length % self.recurrent_chunk_size != 0)
+                                  seq_length % recurrent_chunk_size != 0)
         if need_pad_for_chunkwise:
-            padding_len = self.recurrent_chunk_size - seq_length % self.recurrent_chunk_size
+            padding_len = recurrent_chunk_size - seq_length % recurrent_chunk_size
             slen = seq_length + padding_len
             hidden_states = F.pad(hidden_states, (0, 0, 0, padding_len))
         else:
@@ -708,7 +718,8 @@ class RetNetModel(RetNetPreTrainedModel):
         # relative position
         retention_rel_pos = self.retnet_rel_pos(slen,
                                                 past_key_values is not None and not is_first_step,
-                                                forward_impl=forward_impl)
+                                                forward_impl=forward_impl,
+                                                retention_mask=retention_mask)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -734,7 +745,7 @@ class RetNetModel(RetNetPreTrainedModel):
                 def create_custom_forward(module):
 
                     def custom_forward(*inputs):
-                        return module(*inputs, recurrent_chunk_size, output_retentions)
+                        return module(*inputs, output_retentions)
 
                     return custom_forward
 
@@ -752,7 +763,6 @@ class RetNetModel(RetNetPreTrainedModel):
                                       retention_mask=retention_mask,
                                       forward_impl=forward_impl,
                                       past_key_value=past_key_value,
-                                      recurrent_chunk_size=recurrent_chunk_size,
                                       output_retentions=output_retentions)
 
             hidden_states = block_outputs[0]
