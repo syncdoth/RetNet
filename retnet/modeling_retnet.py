@@ -96,6 +96,8 @@ class RetNetRelPos(nn.Module):
             mask = mask.unsqueeze(0)  # [1, h, t, t]
             # TODO: need to handle retention_mask
             # scaling
+            # TODO: removing scaling from chunkwise and parallel makes them equivalent.
+            # but scaling is required for recurrent.
             scale = mask.sum(dim=-1, keepdim=True).sqrt()
             mask = mask / scale
 
