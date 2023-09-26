@@ -42,6 +42,58 @@ def get_activation_fn(activation):
         raise NotImplementedError
 
 
+class RetNetRelPos(nn.Module):
+
+    def __init__(self, config: RetNetConfig):
+        super().__init__()
+        angle = 1.0 / (10000**torch.linspace(
+            0, 1, config.decoder_embed_dim // config.decoder_retention_heads // 2))
+        angle = angle.unsqueeze(-1).repeat(1, 2).flatten()
+        decay = torch.log(1 -
+                          2**(-5 - torch.arange(config.decoder_retention_heads, dtype=torch.float)))
+        self.register_buffer("angle", angle)
+        self.register_buffer("decay", decay)
+        self.recurrent_chunk_size = config.recurrent_chunk_size
+
+    def forward(self, slen, activate_recurrent=False, chunkwise_recurrent=False):
+        if activate_recurrent:
+            sin = torch.sin(self.angle * (slen - 1))
+            cos = torch.cos(self.angle * (slen - 1))
+            retention_rel_pos = ((sin, cos), self.decay.exp())
+        elif chunkwise_recurrent:
+            index = torch.arange(slen).to(self.decay)
+            sin = torch.sin(index[:, None] * self.angle[None, :])
+            cos = torch.cos(index[:, None] * self.angle[None, :])
+
+            block_index = torch.arange(self.recurrent_chunk_size).to(self.decay)
+            mask = torch.tril(
+                torch.ones(self.recurrent_chunk_size, self.recurrent_chunk_size).to(self.decay))
+            mask = torch.masked_fill(block_index[:, None] - block_index[None, :], ~mask.bool(),
+                                     float("inf"))
+            mask = torch.exp(mask * self.decay[:, None, None])
+            mask = torch.nan_to_num(mask)
+            scale = mask.sum(dim=-1, keepdim=True).sqrt()
+            mask = mask / scale
+
+            cross_decay = torch.exp(self.decay * self.recurrent_chunk_size)
+            inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
+            cross_decay = cross_decay[:, None, None]
+            inner_decay = inner_decay[:, :, None] / (scale / scale[:, -1, None])
+            retention_rel_pos = ((sin, cos), (mask, cross_decay, inner_decay))
+        else:  # parallel
+            index = torch.arange(slen).to(self.decay)
+            sin = torch.sin(index[:, None] * self.angle[None, :])
+            cos = torch.cos(index[:, None] * self.angle[None, :])
+            mask = torch.tril(torch.ones(slen, slen).to(self.decay))
+            mask = torch.masked_fill(index[:, None] - index[None, :], ~mask.bool(), float("inf"))
+            mask = torch.exp(mask * self.decay[:, None, None])
+            mask = torch.nan_to_num(mask)
+            mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
+            retention_rel_pos = ((sin, cos), mask)
+
+        return retention_rel_pos
+
+
 class MultiScaleRetention(nn.Module):
     # TODO: normalization to decay in the paper
     def __init__(self, config: RetNetConfig, value_factor: int = 2):
