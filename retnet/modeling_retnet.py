@@ -106,9 +106,7 @@ class RetNetRelPos(nn.Module):
             cross_decay = cross_decay[None, :, None, None]
             inner_decay = inner_decay[None, :, :, None] / (scale / scale[:, :, -1, None])
             # decay_scale (used for kv cache)
-            exponent = torch.arange(slen, device=self.decay.device).float()
-            decay_scale = self.decay.exp().view(-1, 1)**exponent.view(1, -1)
-            decay_scale = decay_scale.sum(-1).view(1, -1, 1, 1)
+            decay_scale = self.compute_decay_scale(slen, retention_mask)
             retention_rel_pos = ((sin, cos), (mask, cross_decay, inner_decay, decay_scale))
         else:  # parallel
             index = torch.arange(slen).to(self.decay)
@@ -121,19 +119,36 @@ class RetNetRelPos(nn.Module):
             mask = mask.unsqueeze(0)  # [1, h, t, t]
             if retention_mask is not None:
                 # this is required for left padding
-                # TODO: check if it should be after scaling
-                retention_mask = retention_mask.float().view(-1, 1, 1, slen)
-                mask *= retention_mask
+                mask = mask * retention_mask.float().view(-1, 1, 1, slen)
+
             # scaling
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
+            mask = torch.nan_to_num(mask, nan=0.0)
             # decay_scale (used for kv cache)
-            exponent = torch.arange(slen, device=self.decay.device).float()
-            decay_scale = self.decay.exp().view(-1, 1)**exponent.view(1, -1)
-            decay_scale = decay_scale.sum(-1).view(1, -1, 1, 1)
+            decay_scale = self.compute_decay_scale(slen, retention_mask)
+            # mask processing for intra decay
+            if retention_mask is not None:
+                max_non_zero = torch.cumsum(retention_mask, dim=-1).max(dim=-1).indices  # [b,]
+                intra_decay = mask[range(mask.shape[0]), :, max_non_zero]
+            else:
+                intra_decay = mask[:, :, -1]
 
-            retention_rel_pos = ((sin, cos), (mask, decay_scale))
+            retention_rel_pos = ((sin, cos), (mask, intra_decay, decay_scale))
 
         return retention_rel_pos
+
+    def compute_decay_scale(self, slen, retention_mask=None):
+        exponent = torch.arange(slen, device=self.decay.device).float()
+        decay_scale = self.decay.exp().view(-1, 1)**exponent.view(1, -1)
+        if retention_mask is not None:
+            seqlen = retention_mask.sum(dim=-1)  # [b,]
+            for pos in seqlen:
+                # the formula for decay_scale is `sum(gamma^i) for i in [0, slen).`
+                # Since the retention_mask is 0 for padding, we can set the decay_scale
+                # to 0 for the padding positions.
+                decay_scale[:, pos.item():] = 0
+        decay_scale = decay_scale.sum(-1).view(1, -1, 1, 1)
+        return decay_scale
 
 
 class MultiScaleRetention(nn.Module):
@@ -181,7 +196,7 @@ class MultiScaleRetention(nn.Module):
         v,  # bsz * num_head * len * v_dim
         decay_mask,  # (1 or bsz) * num_head * len * len
         """
-        decay_mask, scale = decay_mask
+        decay_mask, intra_decay, scale = decay_mask
         # [b, h, t, t]
         retention = q @ k.transpose(-1, -2)  # (scaled dot-product)
         retention = retention * decay_mask
@@ -194,7 +209,7 @@ class MultiScaleRetention(nn.Module):
 
         # kv cache: [b, h, t, v_dim, qk_dim]
         current_kv = k.unsqueeze(-2) * v.unsqueeze(-1)
-        intra_decay = decay_mask[:, :, -1, :, None, None]
+        intra_decay = intra_decay[:, :, :, None, None]  # [b, h, t, 1, 1]
         current_kv = (current_kv * intra_decay).sum(2)  # [b, h, v_dim, qk_dim]
 
         cache = {"prev_key_value": current_kv, "scale": scale}
@@ -209,20 +224,33 @@ class MultiScaleRetention(nn.Module):
         decay # (1 or bsz) * num_head * 1 * 1
         retention_mask # bsz * 1
         """
-        retention_mask = retention_mask.view(-1, 1, 1, 1) if retention_mask is not None else 1
+        if retention_mask is not None:
+            retention_mask = retention_mask.float().view(-1, 1, 1, 1)
+        else:
+            retention_mask = torch.ones(k.size(0), 1, 1, 1).to(decay)
         # (b, h, v_dim, qk_dim)
-        current_kv = k * v.transpose(-1, -2)
+        current_kv = k * v.transpose(-1, -2) * retention_mask
 
         if past_key_value is not None and "prev_key_value" in past_key_value:
             prev_kv = past_key_value["prev_key_value"]
             prev_scale = past_key_value["scale"]
-            scale = prev_scale * decay + 1
+            scale = torch.where(retention_mask == 0, prev_scale, prev_scale * decay + 1)
             # connect prev_kv and current_kv
-            prev_kv *= (prev_scale.sqrt() * decay / scale.sqrt())
-            current_kv /= scale.sqrt()
-            current_kv = prev_kv + retention_mask * current_kv
+            # how much to decay prev_kv
+            decay_amount = prev_scale.sqrt() * decay / scale.sqrt()
+            decay_amount = torch.where(retention_mask == 0, 1, decay_amount)
+            prev_kv *= decay_amount  # decay prev_kv
+            current_kv /= scale.sqrt()  # scale current_kv
+            current_kv = torch.nan_to_num(current_kv, nan=0.0)  # remove nan, scale might be 0
+
+            current_kv = prev_kv + current_kv
         else:
             scale = torch.ones_like(decay)
+            # when retention_mask is 0 at the beginning, setting scale to 1 will
+            # make the first retention to use the padding incorrectly. Hence,
+            # setting it to 0 here. This is a little ugly, so we might want to
+            # change this later. TODO: improve
+            scale = torch.where(retention_mask == 0, torch.zeros_like(decay), scale)
 
         output = torch.sum(q * current_kv, dim=3).unsqueeze(1)  # (b, 1, h, d_v)
 
@@ -923,7 +951,6 @@ class RetNetModelWithLMHead(RetNetPreTrainedModel):
             else:
                 past_key_values = None
                 for p_i in range(input_ids.shape[1] - 1):
-                    # TODO: double check ret_mask implementation
                     ret_mask = retention_mask[:,
                                               p_i:p_i + 1] if retention_mask is not None else None
                     outputs = self(input_ids[:, :p_i + 1],
