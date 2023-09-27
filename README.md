@@ -1,7 +1,10 @@
 # RetNet
 
-A huggingface transformer compatible implementation of Retention Networks. ([https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf))
-Supports all types of forward implementations: `parallel`, `recurrent`, `chunkwise`
+A huggingface transformer compatible implementation of Retention Networks. ([https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf)) The implementation is on par with the official implementation at [torchscale](https://github.com/microsoft/torchscale) repo.
+
+Supports two types of implementations: `parallel`, `recurrent`.
+
+- My version (main branch) supports `chunkwise` forward.
 
 Check `play.ipynb` for minimal testing of parallel, recurrent, and chunkwise forward.
 
@@ -39,7 +42,7 @@ parallel_cache = parallel_outputs.past_key_values
 past_kv = None
 rnn_state = []
 for i in range(input_ids.shape[1]):
-    rnn_out = model(input_ids[:, i:i+1], forward_impl='recurrent', past_key_values=past_kv, use_cache=True, sequence_offset=i)
+    rnn_out = model(input_ids[:, :i+1], forward_impl='recurrent', past_key_values=past_kv, use_cache=True)
     rnn_state.append(rnn_out.last_hidden_state)
     past_kv = rnn_out.past_key_values
 rnn_state = torch.cat(rnn_state, dim=1)
@@ -65,7 +68,7 @@ config = load_config_from_yaml('configs/retnet-1.3b.yml')
 model = RetNetModelWithLMHead(config)
 
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
-tokenizer.model_max_length = 8192
+tokenizer.model_max_length = 4096
 tokenizer.pad_token = tokenizer.eos_token
 
 inputs = tokenizer("Retention refers to", return_tensors='pt')
@@ -82,8 +85,8 @@ tokenizer.batch_decode(generated)
 
 ## Huggingface Integration
 
-Because of `sequence_offset` parameter, it cannot utilize `GenerateMixin.generate` function.
-Resorting to custom generate function for now.
+It currently uses a custom version of `past_key_values`, which hinders it being used with
+`generateMixIn`. Other than that, almost all of huggingface interfaces should work together.
 
 ### Minimal Training Example
 
@@ -108,6 +111,7 @@ python train.py \
     --per_device_eval_batch_size 16
 
 ```
+## Some Old Notes
 
 ## xpos note
 
