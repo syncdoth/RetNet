@@ -36,6 +36,7 @@ class RetNetConfig(PretrainedConfig):
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = False,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
+            use_lm_decay: bool = False,
             deepnorm: bool = False,
             subln: bool = True,
             layernorm_eps: float = 1e-5,
@@ -43,6 +44,7 @@ class RetNetConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
         self.output_retentions = output_retentions
+        self.use_lm_decay = use_lm_decay
         # size related
         self.decoder_embed_dim = decoder_embed_dim
         self.value_factor = value_factor
