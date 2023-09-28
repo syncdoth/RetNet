@@ -178,7 +178,9 @@ class MultiScaleRetention(nn.Module):
 
         self.out_proj = nn.Linear(self.v_dim, self.embed_dim, bias=True)
 
-        self.group_norm = LayerNorm(self.head_dim, eps=1e-6, elementwise_affine=False)
+        self.group_norm = LayerNorm(self.head_dim,
+                                    eps=config.layernorm_eps,
+                                    elementwise_affine=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -264,11 +266,11 @@ class MultiScaleRetention(nn.Module):
             - "prev_key_value"  # bsz * num_head * v_dim * qk_dim
             - "scale"  # (1 or bsz) * num_head * 1 * 1
         decay_mask,  # 1 * num_head * chunk_size * chunk_size
-        chunk_decay,  # 1 * num_head * 1 * 1
+        cross_decay,  # 1 * num_head * 1 * 1
         inner_decay,  # 1 * num_head * chunk_size * 1
         """
         # TODO: not working properly
-        decay_mask, chunk_decay, inner_decay, decay_scale = decay_mask
+        decay_mask, cross_decay, inner_decay, decay_scale = decay_mask
         bsz, _, tgt_len, _ = v.size()
         chunk_len = decay_mask.size(-1)
         assert tgt_len % chunk_len == 0
@@ -302,7 +304,7 @@ class MultiScaleRetention(nn.Module):
         for i in range(num_chunks):
             kv_recurrent.append(kv_state / kv_scale)
             cross_scale.append(kv_scale)
-            kv_state = kv_state * chunk_decay + kv[:, i]
+            kv_state = kv_state * cross_decay + kv[:, i]
             kv_scale = kv_state.detach().abs().sum(dim=-2, keepdim=True).max(
                 dim=-1, keepdim=True).values.clamp(min=1)
 
@@ -338,7 +340,7 @@ class MultiScaleRetention(nn.Module):
         g = self.g_proj(hidden_states)
         # multi-head
         q, k, v = split_heads((q, k, v), B, T, self.num_heads)
-        k = k * self.scaling  # for scaled dot product
+        k *= self.scaling  # for scaled dot product
         # rotate
         # NOTE: theta_shift has bug with mps device.
         qr = theta_shift(q, sin, cos)
@@ -696,9 +698,8 @@ class RetNetModel(RetNetPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.forward_embedding(input_ids, inputs_embeds, past_key_values)
 
-        if retention_mask is None:
-            if attention_mask is not None:
-                retention_mask = attention_mask
+        if retention_mask is None and attention_mask is not None:
+            retention_mask = attention_mask
 
         hidden_states = inputs_embeds
 
@@ -723,7 +724,7 @@ class RetNetModel(RetNetPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_retentions = () if output_retentions else None
         # layers * [bsz, num_head, qk_dim, decoder_embed_dim]
-        next_decoder_cache = [] if use_cache else None
+        next_decoder_cache = () if use_cache else None
 
         for idx, layer in enumerate(self.layers):
             if output_hidden_states:
@@ -758,7 +759,7 @@ class RetNetModel(RetNetPreTrainedModel):
             hidden_states = block_outputs[0]
 
             if use_cache:
-                next_decoder_cache.append(block_outputs[1])
+                next_decoder_cache += (block_outputs[1],)
 
             if output_retentions:
                 all_retentions += (block_outputs[2],)
