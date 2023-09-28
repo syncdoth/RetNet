@@ -13,23 +13,20 @@ from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
+try:
+    from apex.normalization import FusedLayerNorm as LayerNorm
+except ModuleNotFoundError:
+    from torch.nn import LayerNorm
+
 from .configuration_retnet import RetNetConfig
 
 logger = logging.get_logger(__name__)
 
 
 # helper functions
-def split_chunks(*tensors, size, dim=0):
-    return [torch.split(x, size, dim=dim) for x in tensors]
-
-
 def split_heads(tensors, bsz, seqlen, num_heads):
     assert isinstance(tensors, (tuple, list))
     return [x.view(bsz, seqlen, num_heads, -1).transpose(1, 2) for x in tensors]
-
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def rotate_every_two(x):
@@ -181,7 +178,7 @@ class MultiScaleRetention(nn.Module):
 
         self.out_proj = nn.Linear(self.v_dim, self.embed_dim, bias=True)
 
-        self.group_norm = nn.LayerNorm(self.head_dim, eps=1e-6, elementwise_affine=False)
+        self.group_norm = LayerNorm(self.head_dim, eps=1e-6, elementwise_affine=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -394,7 +391,7 @@ class FeedForwardNetwork(nn.Module):
         self.dropout_module = torch.nn.Dropout(dropout)
         self.fc1 = nn.Linear(self.embed_dim, ffn_dim)
         self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
-        self.ffn_layernorm = nn.LayerNorm(ffn_dim, eps=layernorm_eps) if subln else None
+        self.ffn_layernorm = LayerNorm(ffn_dim, eps=layernorm_eps) if subln else None
 
     def reset_parameters(self):
         self.fc1.reset_parameters()
@@ -451,7 +448,7 @@ class RetNetDecoderLayer(nn.Module):
 
         self.normalize_before = config.decoder_normalize_before
 
-        self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.retention_layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
 
         self.ffn_dim = config.decoder_ffn_embed_dim
 
@@ -465,7 +462,7 @@ class RetNetDecoderLayer(nn.Module):
             self.config.subln,
         )
 
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.final_layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
 
         if config.deepnorm:
             self.alpha = math.pow(2.0 * config.decoder_layers, 0.25)
@@ -602,7 +599,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.embed_tokens = embed_tokens
 
         if config.layernorm_embedding:
-            self.layernorm_embedding = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layernorm_embedding = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
         else:
             self.layernorm_embedding = None
 
@@ -614,7 +611,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.decoder_layers = len(self.layers)
 
         if config.decoder_normalize_before:
-            self.layer_norm = nn.LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
         else:
             self.layer_norm = None
 
