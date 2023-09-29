@@ -33,7 +33,7 @@ class RetNetConfig(object):
         self.share_decoder_input_output_embed = kwargs.pop("share_decoder_input_output_embed",
                                                            False)
         self.max_target_positions = kwargs.pop("max_target_positions", 1024)
-        self.no_output_layer = kwargs.pop("no_output_layer", False)
+        self.no_output_layer = kwargs.pop("no_output_layer", True)
         self.layernorm_eps = kwargs.pop("layernorm_eps", 1e-5)
         # Blockwise
         self.chunkwise_recurrent = kwargs.pop("chunkwise_recurrent", False)
