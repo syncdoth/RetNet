@@ -54,8 +54,8 @@ def test_load_state_dict():
 
 my_retnet.lm_head.load_state_dict(ts_retnet.output_projection.state_dict())
 
-my_retnet.eval()
-ts_retnet.eval()
+my_retnet.train()
+ts_retnet.train()
 # device
 my_retnet.to(device)
 ts_retnet.to(device)
