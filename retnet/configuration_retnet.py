@@ -34,7 +34,7 @@ class RetNetConfig(PretrainedConfig):
             decoder_retention_heads: int = 2,  # num decoder retention heads
             decoder_normalize_before: bool = True,  # apply layernorm before each decoder block
             layernorm_embedding: bool = False,  # add layernorm to embedding
-            no_scale_embedding: bool = False,  # if True, dont scale embeddings
+            no_scale_embedding: bool = True,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
             use_lm_decay: bool = False,
             deepnorm: bool = False,
