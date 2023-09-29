@@ -241,8 +241,8 @@ class MultiScaleRetention(nn.Module):
             # how much to decay prev_kv
             decay_amount = prev_scale.sqrt() * decay / scale.sqrt()
             decay_amount = torch.where(retention_mask == 0, 1, decay_amount)
-            prev_kv *= decay_amount  # decay prev_kv
-            current_kv /= scale.sqrt()  # scale current_kv
+            prev_kv = prev_kv * decay_amount  # decay prev_kv
+            current_kv = current_kv / scale.sqrt()  # scale current_kv
             current_kv = torch.nan_to_num(current_kv, nan=0.0)  # remove nan, scale might be 0
 
             current_kv = prev_kv + current_kv

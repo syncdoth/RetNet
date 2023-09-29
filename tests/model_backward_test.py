@@ -15,6 +15,7 @@ from torchscale.retnet import RetNetModel as TSRetNetModel
 from torchscale.config import RetNetConfig as TSRetNetConfig
 from transformers import AutoTokenizer
 
+torch.autograd.set_detect_anomaly(True)
 tokenizer = AutoTokenizer.from_pretrained('gpt2')
 tokenizer.pad_token = tokenizer.eos_token
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -125,6 +126,55 @@ def test_parallel_gradient():
             p2 = my_param_dict[key]
 
         # NOTE: To see the outputs, use `pytest -s` option
+        if p1.grad is None and p2.grad is None:
+            print(key, "both grad is None")
+            continue
+        if p1.grad is not None and p2.grad is None:
+            print(key, "p2 grad is None")
+            continue
+        if p1.grad is None and p2.grad is not None:
+            print(key, "p1 grad is None")
+            continue
+        assert torch.allclose(p1.grad, p2.grad), f"Parameter {key}'s grad is not the same"
+    my_retnet.zero_grad()
+    ts_retnet.zero_grad()
+
+
+def test_recurrent_gradient():
+    input_ids, labels = get_data_sample(text)
+    incremental_state = {}
+    past_key_values = None
+    my_logits = []
+    ts_logits = []
+    for i in range(input_ids.shape[1]):
+        my_outputs = my_retnet(input_ids=input_ids[:, :i + 1],
+                               past_key_values=past_key_values,
+                               forward_impl='recurrent',
+                               use_cache=True)
+        my_logits.append(my_outputs.logits)
+        past_key_values = my_outputs.past_key_values
+        ts_outputs = ts_retnet(input_ids[:, :i + 1], incremental_state=incremental_state)
+        ts_logits.append(ts_outputs[0])
+
+    my_logits = torch.cat(my_logits, dim=1)
+    ts_logits = torch.cat(ts_logits, dim=1)
+    assert torch.allclose(my_logits, ts_logits)
+
+    my_loss = compute_loss(my_logits, labels)
+    ts_loss = compute_loss(ts_logits, labels)
+    assert torch.allclose(my_loss, ts_loss)
+
+    my_loss.backward()
+    ts_loss.backward()
+
+    my_param_dict = dict(my_retnet.model.named_parameters())
+    for key, p1 in ts_retnet.named_parameters():
+        if key == 'output_projection.weight':
+            p2 = my_retnet.lm_head.weight
+        else:
+            p2 = my_param_dict[key]
+
+        # NOTE:To see the outputs, use `pytest -s` option
         if p1.grad is None and p2.grad is None:
             print(key, "both grad is None")
             continue
