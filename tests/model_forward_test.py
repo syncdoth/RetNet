@@ -33,8 +33,7 @@ ts_config = TSRetNetConfig(
 )
 ts_retnet = TSRetNetModel(ts_config, embed_tokens=torch.nn.Embedding(50257, 128))
 
-torch.save(ts_retnet.state_dict(), "ts_retnet.pt")
-my_retnet.load_state_dict(torch.load("ts_retnet.pt"))
+my_retnet.load_state_dict(ts_retnet.state_dict())
 
 text = "Let's compare the models on this dummy text!"
 input_ids = tokenizer(text, return_tensors='pt')['input_ids']
@@ -93,8 +92,3 @@ def test_chunkwise_forward():
         my_chunk = my_outputs.last_hidden_state
         ts_chunk = ts_outputs[0]
     assert torch.allclose(my_chunk, ts_chunk)
-
-
-# delete the weight
-
-os.remove("ts_retnet.pt")
