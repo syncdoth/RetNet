@@ -740,7 +740,7 @@ class RetNetModel(RetNetPreTrainedModel):
 
                     return custom_forward
 
-                block_outputs = torch.utils.checkpoint.checkpoint(
+                layer_outputs = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(layer),
                     hidden_states,
                     retention_rel_pos,
@@ -749,24 +749,20 @@ class RetNetModel(RetNetPreTrainedModel):
                     past_key_value,
                 )
             else:
-                block_outputs = layer(hidden_states,
+                layer_outputs = layer(hidden_states,
                                       retention_rel_pos,
                                       retention_mask=retention_mask,
                                       forward_impl=forward_impl,
                                       past_key_value=past_key_value,
                                       output_retentions=output_retentions)
 
-            hidden_states = block_outputs[0]
+            hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache += (block_outputs[1],)
+                next_decoder_cache += (layer_outputs[1],)
 
             if output_retentions:
-                all_retentions += (block_outputs[2],)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+                all_retentions += (layer_outputs[2],)
 
         next_cache = next_decoder_cache if use_cache else None
 
@@ -775,6 +771,10 @@ class RetNetModel(RetNetPreTrainedModel):
 
         if self.layer_norm is not None:
             hidden_states = self.layer_norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_retentions]
