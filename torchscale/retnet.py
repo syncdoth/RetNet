@@ -64,8 +64,8 @@ class RetNetRelPos(nn.Module):
             cos = torch.cos(index[:, None] * self.angle[None, :])
 
             block_index = torch.arange(self.recurrent_chunk_size).to(self.decay)
-            mask = torch.tril(
-                torch.ones(self.recurrent_chunk_size, self.recurrent_chunk_size).to(self.decay))
+            mask = torch.tril(torch.ones(self.recurrent_chunk_size,
+                                         self.recurrent_chunk_size)).to(self.decay)
             mask = torch.masked_fill(block_index[:, None] - block_index[None, :], ~mask.bool(),
                                      float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
@@ -82,7 +82,7 @@ class RetNetRelPos(nn.Module):
             index = torch.arange(slen).to(self.decay)
             sin = torch.sin(index[:, None] * self.angle[None, :])
             cos = torch.cos(index[:, None] * self.angle[None, :])
-            mask = torch.tril(torch.ones(slen, slen).to(self.decay))
+            mask = torch.tril(torch.ones(slen, slen)).to(self.decay)
             mask = torch.masked_fill(index[:, None] - index[None, :], ~mask.bool(), float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
             mask = torch.nan_to_num(mask)
