@@ -624,7 +624,6 @@ class RetNetForCausalLM(nn.Module):
             incremental_state=past_key_values,
             features_only=False,
             token_embeddings=inputs_embeds,
-            output_hidden_states=output_hidden_states,
         )
 
         logits, inner_hidden_states = outputs[0], outputs[1]['inner_states']
