@@ -2,6 +2,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 
 import math
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -9,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 # from fairscale.nn import checkpoint_wrapper, wrap
 from timm.models.layers import drop_path
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
     from apex.normalization import FusedLayerNorm as LayerNorm
@@ -565,3 +567,89 @@ class RetNetModel(nn.Module):
 
     def output_layer(self, features):
         return self.output_projection(features)
+
+
+class RetNetForCausalLM(nn.Module):
+
+    def __init__(self, config, embed_tokens=None, output_projection=None, **kwargs):
+        super().__init__(**kwargs)
+        assert config.vocab_size > 0, "you must specify vocab size"
+        if output_projection is None:
+            config.no_output_layer = False
+        if embed_tokens is None:
+            embed_tokens = nn.Embedding(config.vocab_size, config.decoder_embed_dim,
+                                        config.pad_token_id)
+
+        self.config = config
+        self.model = RetNetModel(config,
+                                 embed_tokens=embed_tokens,
+                                 output_projection=output_projection,
+                                 **kwargs)
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.model.output_projection
+
+    def set_output_embeddings(self, new_embeddings):
+        self.model.output_projection = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        retention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_retentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        recurrent_chunk_size: Optional[int] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        outputs = self.model(
+            input_ids,
+            incremental_state=past_key_values,
+            features_only=False,
+            token_embeddings=inputs_embeds,
+            output_hidden_states=output_hidden_states,
+        )
+
+        logits, inner_hidden_states = outputs[0], outputs[1]['inner_states']
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = nn.CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=past_key_values,
+            hidden_states=inner_hidden_states,
+            attentions=None,
+        )

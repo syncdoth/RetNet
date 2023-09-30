@@ -46,6 +46,8 @@ class RetNetConfig(object):
         self.ddp_rank = kwargs.pop("ddp_rank", 0)
         self.xpos_rel_pos = kwargs.pop("xpos_rel_pos", False)
         self.xpos_scale_base = kwargs.pop("xpos_scale_base", 512)
+        # token id
+        self.pad_token_id = kwargs.pop("pad_token_id", 0)
 
         if self.deepnorm:
             self.decoder_normalize_before = False
