@@ -78,3 +78,8 @@ class RetNetConfig(PretrainedConfig):
                          eos_token_id=eos_token_id,
                          use_cache=use_cache,
                          **kwargs)
+
+    def override(self, args):
+        for hp in self.__dict__.keys():
+            if getattr(args, hp, None) is not None:
+                self.__dict__[hp] = getattr(args, hp, None)
