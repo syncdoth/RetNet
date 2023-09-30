@@ -40,7 +40,7 @@ ts_config = TSRetNetConfig(
     no_output_layer=False,
 )
 ts_retnet = TSRetNetModel(ts_config,
-                          embed_tokens=torch.nn.Embedding(50257, 128),
+                          embed_tokens=torch.nn.Embedding(50257, 128, ts_config.pad_token_id),
                           output_projection=torch.nn.Linear(128, 50257, bias=False))
 
 incompatible_keys = my_retnet.model.load_state_dict(ts_retnet.state_dict(), strict=False)
