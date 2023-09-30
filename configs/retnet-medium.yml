@@ -4,7 +4,7 @@ decoder_layers: 16
 decoder_retention_heads: 4
 decoder_ffn_embed_dim: 2048
 initializer_range: 0.02
-layernorm_eps: 1e-5
+layernorm_eps: 1.0e-5
 activation_fn: "gelu"
 dropout: 0.0
 activation_dropout: 0.0
