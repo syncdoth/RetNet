@@ -60,12 +60,12 @@ chunk_cache = chunk_outputs.past_key_values
 
 ```python
 import torch
-from retnet.modeling_retnet import RetNetModelWithLMHead
+from retnet.modeling_retnet import RetNetForCausalLM
 from retnet.configuration_retnet import load_config_from_yaml
 from transformers import AutoTokenizer
 
 config = load_config_from_yaml('configs/retnet-1.3b.yml')
-model = RetNetModelWithLMHead(config)
+model = RetNetForCausalLM(config)
 
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
 tokenizer.model_max_length = 4096

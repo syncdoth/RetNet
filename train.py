@@ -4,7 +4,7 @@ from transformers import (Trainer, TrainingArguments, AutoTokenizer, HfArgumentP
                           DataCollatorForLanguageModeling)
 from datasets import load_dataset
 
-from retnet.modeling_retnet import RetNetModelWithLMHead
+from retnet.modeling_retnet import RetNetForCausalLM
 from retnet.configuration_retnet import load_config_from_yaml
 
 
@@ -24,7 +24,7 @@ def main():
     eval_dataset = load_dataset(args.dataset_name, split="validation")
 
     config = load_config_from_yaml(f"configs/retnet-{args.model_size}.yml")
-    model = RetNetModelWithLMHead(config)
+    model = RetNetForCausalLM(config)
 
     tokenizer = AutoTokenizer.from_pretrained('gpt2')
     tokenizer.model_max_length = 16384

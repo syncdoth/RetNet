@@ -822,7 +822,7 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
     retentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
-class RetNetModelWithLMHead(RetNetPreTrainedModel):
+class RetNetForCausalLM(RetNetPreTrainedModel):
 
     def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None) -> None:
         super().__init__(config)

@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from retnet.modeling_retnet import RetNetModelWithLMHead
+from retnet.modeling_retnet import RetNetForCausalLM
 from retnet.configuration_retnet import RetNetConfig
 from torchscale.retnet import RetNetModel as TSRetNetModel
 from torchscale.config import RetNetConfig as TSRetNetConfig
@@ -28,7 +28,7 @@ my_config = RetNetConfig(
     vocab_size=50257,
     tie_word_embeddings=False,
 )
-my_retnet = RetNetModelWithLMHead(my_config)
+my_retnet = RetNetForCausalLM(my_config)
 
 ts_config = TSRetNetConfig(
     decoder_layers=6,
