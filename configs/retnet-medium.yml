@@ -1,8 +1,8 @@
 vocab_size: 50257
-decoder_embed_dim: 2560
-decoder_layers: 32
-decoder_retention_heads: 10
-decoder_ffn_embed_dim: 5120
+decoder_embed_dim: 1024
+decoder_layers: 16
+decoder_retention_heads: 4
+decoder_ffn_embed_dim: 2048
 initializer_range: 0.02
 layernorm_eps: 1.0e-5
 activation_fn: "gelu"
