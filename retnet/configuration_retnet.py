@@ -36,6 +36,7 @@ class RetNetConfig(PretrainedConfig):
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = True,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
+            use_glu: bool = False,  # use GLU instead of FFN
             use_lm_decay: bool = False,
             deepnorm: bool = False,
             subln: bool = True,
@@ -46,6 +47,7 @@ class RetNetConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.output_retentions = output_retentions
         self.use_lm_decay = use_lm_decay
+        self.use_glu = use_glu
         # size related
         self.decoder_embed_dim = decoder_embed_dim
         self.decoder_value_embed_dim = decoder_value_embed_dim

@@ -396,15 +396,7 @@ class RetNetDecoderLayer(nn.Module):
 
         self.ffn_dim = config.decoder_ffn_embed_dim
 
-        self.ffn = GLU(
-            self.embed_dim,
-            self.ffn_dim,
-            self.config.activation_fn,
-            self.config.dropout,
-            self.config.activation_dropout,
-            # self.config.layernorm_eps,
-            # self.config.subln,
-        )
+        self.ffn = self.build_ffn()
 
         self.final_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
 
@@ -412,6 +404,26 @@ class RetNetDecoderLayer(nn.Module):
             self.alpha = math.pow(2.0 * config.decoder_layers, 0.25)
         else:
             self.alpha = 1.0
+
+    def build_ffn(self):
+        if self.config.use_glu:
+            return GLU(
+                self.embed_dim,
+                self.ffn_dim,
+                self.config.activation_fn,
+                self.config.dropout,
+                self.config.activation_dropout,
+            )
+        else:
+            return FeedForwardNetwork(
+                self.embed_dim,
+                self.ffn_dim,
+                self.config.activation_fn,
+                self.config.dropout,
+                self.config.activation_dropout,
+                self.config.layernorm_eps,
+                self.config.subln,
+            )
 
     def residual_connection(self, x, residual):
         return residual * self.alpha + x
@@ -507,11 +519,11 @@ class RetNetModel(nn.Module):
                 if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
                     p.data.div_(init_scale)
 
-        # if config.subln:
-        #     init_scale = math.sqrt(math.log(config.decoder_layers * 2))
-        #     for name, p in self.named_parameters():
-        #         if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
-        #             p.data.mul_(init_scale)
+        if config.subln and not config.use_glu:
+            init_scale = math.sqrt(math.log(config.decoder_layers * 2))
+            for name, p in self.named_parameters():
+                if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
+                    p.data.mul_(init_scale)
 
     def build_output_projection(
         self,
