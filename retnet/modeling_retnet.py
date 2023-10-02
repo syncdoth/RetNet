@@ -962,7 +962,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
                                    use_cache=True)
                     past_key_values = outputs.past_key_values
 
-            generated = input_ids[:, -1].unsqueeze(-1)  # [B, 1]
+            generated = input_ids
         else:
             generated = torch.tensor([[bos_token_id]]).to(self.lm_head.weight.device)
             past_key_values = None
