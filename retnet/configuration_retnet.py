@@ -28,10 +28,10 @@ class RetNetConfig(PretrainedConfig):
             activation_dropout: float = 0.0,  # dropout probability after activation in FFN.
             drop_path_rate: float = 0.0,
             decoder_embed_dim: int = 768,  # decoder embedding dimension
-            value_factor: int = 2,
-            decoder_ffn_embed_dim: int = 1536,  # decoder embedding dimension for FFN
+            decoder_value_embed_dim: int = 1280,  # decoder value embedding dimension
+            decoder_ffn_embed_dim: int = 1280,  # decoder embedding dimension for FFN
             decoder_layers: int = 12,  # num decoder layers
-            decoder_retention_heads: int = 2,  # num decoder retention heads
+            decoder_retention_heads: int = 3,  # num decoder retention heads
             decoder_normalize_before: bool = True,  # apply layernorm before each decoder block
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = True,  # if True, dont scale embeddings
@@ -39,7 +39,8 @@ class RetNetConfig(PretrainedConfig):
             use_lm_decay: bool = False,
             deepnorm: bool = False,
             subln: bool = True,
-            layernorm_eps: float = 1e-5,
+            layernorm_eps: float = 1e-6,
+            tie_word_embeddings: bool = False,
             **kwargs):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
@@ -47,7 +48,7 @@ class RetNetConfig(PretrainedConfig):
         self.use_lm_decay = use_lm_decay
         # size related
         self.decoder_embed_dim = decoder_embed_dim
-        self.value_factor = value_factor
+        self.decoder_value_embed_dim = decoder_value_embed_dim
         self.decoder_retention_heads = decoder_retention_heads
         self.decoder_ffn_embed_dim = decoder_ffn_embed_dim
         self.decoder_layers = decoder_layers
@@ -77,6 +78,7 @@ class RetNetConfig(PretrainedConfig):
                          pad_token_id=pad_token_id,
                          eos_token_id=eos_token_id,
                          use_cache=use_cache,
+                         tie_word_embeddings=tie_word_embeddings,
                          **kwargs)
 
     def override(self, args):

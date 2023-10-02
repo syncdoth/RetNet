@@ -51,6 +51,27 @@ def get_activation_fn(activation):
         raise NotImplementedError
 
 
+class RMSNorm(nn.Module):
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
+        super().__init__()
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(dim))
+        else:
+            self.register_parameter('weight', None)
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        if self.weight is not None:
+            output = output * self.weight
+        return output
+
+
 class RetNetRelPos(nn.Module):
 
     def __init__(self, config: RetNetConfig):
@@ -96,18 +117,20 @@ class RetNetRelPos(nn.Module):
             mask = mask.unsqueeze(0)  # [1, h, t, t]
             # TODO: need to handle retention_mask
             # scaling
-            # TODO: removing scaling from chunkwise and parallel makes them equivalent.
-            # but scaling is required for recurrent.
+            value_inner_decay = mask[:, :, -1] / mask[:, :, -1].sum(dim=-1, keepdim=True)
+            value_inner_decay = value_inner_decay.unsqueeze(-1)
             scale = mask.sum(dim=-1, keepdim=True).sqrt()
-            mask = mask / scale
+            inner_mask = mask / scale
 
             cross_decay = torch.exp(self.decay * recurrent_chunk_size)
-            inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
+            query_inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
             cross_decay = cross_decay[None, :, None, None]
-            inner_decay = inner_decay[None, :, :, None] / (scale / scale[:, :, -1, None])
+            query_inner_decay = query_inner_decay[None, :, :, None] / (
+                scale / mask[:, :, -1].sum(dim=-1)[:, :, None, None])
             # decay_scale (used for kv cache)
             decay_scale = self.compute_decay_scale(slen, retention_mask)
-            retention_rel_pos = ((sin, cos), (mask, cross_decay, inner_decay, decay_scale))
+            retention_rel_pos = ((sin, cos), (inner_mask, cross_decay, query_inner_decay,
+                                              value_inner_decay, decay_scale))
         else:  # parallel
             index = torch.arange(slen).to(self.decay)
             sin = torch.sin(index[:, None] * self.angle[None, :])
@@ -156,31 +179,28 @@ class MultiScaleRetention(nn.Module):
     def __init__(
         self,
         config: RetNetConfig,
-        value_factor: int = 2,
         gate_fn="swish",
+        use_bias=False,
     ):
         super().__init__()
         self.config = config
-        self.factor = value_factor
         self.embed_dim = config.decoder_embed_dim
-        self.v_dim = config.decoder_embed_dim * value_factor
+        self.value_dim = config.decoder_value_embed_dim
         self.num_heads = config.decoder_retention_heads
+        self.head_dim = self.value_dim // self.num_heads
         self.key_dim = self.embed_dim // self.num_heads
-        self.head_dim = self.v_dim // self.num_heads
         self.scaling = self.key_dim**-0.5
 
         self.gate_fn = get_activation_fn(activation=str(gate_fn))
 
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.v_proj = nn.Linear(self.embed_dim, self.v_dim, bias=True)
-        self.g_proj = nn.Linear(self.embed_dim, self.v_dim, bias=True)
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=use_bias)
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=use_bias)
+        self.v_proj = nn.Linear(self.embed_dim, self.value_dim, bias=use_bias)
+        self.g_proj = nn.Linear(self.embed_dim, self.value_dim, bias=use_bias)
 
-        self.out_proj = nn.Linear(self.v_dim, self.embed_dim, bias=True)
+        self.out_proj = nn.Linear(self.value_dim, self.embed_dim, bias=use_bias)
 
-        self.group_norm = LayerNorm(self.head_dim,
-                                    eps=config.layernorm_eps,
-                                    elementwise_affine=False)
+        self.group_norm = RMSNorm(self.head_dim, eps=config.layernorm_eps, elementwise_affine=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -189,7 +209,6 @@ class MultiScaleRetention(nn.Module):
         nn.init.xavier_uniform_(self.v_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.g_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.out_proj.weight)
-        nn.init.constant_(self.out_proj.bias, 0.0)
 
     def parallel_retention(self, q, k, v, decay_mask):
         """
@@ -270,7 +289,7 @@ class MultiScaleRetention(nn.Module):
         inner_decay,  # 1 * num_head * chunk_size * 1
         """
         # TODO: not working properly
-        decay_mask, cross_decay, inner_decay, decay_scale = decay_mask
+        decay_mask, cross_decay, query_inner_decay, value_inner_decay, decay_scale = decay_mask
         bsz, _, tgt_len, _ = v.size()
         chunk_len = decay_mask.size(-1)
         assert tgt_len % chunk_len == 0
@@ -292,8 +311,8 @@ class MultiScaleRetention(nn.Module):
 
         # reduce kv in one chunk
         # [b, n_c, h, qk_dim, v_dim]
-        kv = k_t @ (v * decay_mask[:, None, :, -1, :, None])
-        kv = kv.view(bsz, num_chunks, self.num_heads, self.key_dim, self.head_dim)
+        kv = k_t @ (v * value_inner_decay)
+        # kv = kv.view(bsz, num_chunks, self.num_heads, self.key_dim, self.head_dim)
 
         kv_recurrent = []
         cross_scale = []
@@ -315,7 +334,7 @@ class MultiScaleRetention(nn.Module):
         align_inner_scale = all_scale / inner_scale
         align_cross_scale = all_scale / cross_scale
 
-        cross_output = (q * inner_decay.unsqueeze(1)) @ kv_recurrent
+        cross_output = (q * query_inner_decay.unsqueeze(1)) @ kv_recurrent
         output = inner_output / align_inner_scale + cross_output / align_cross_scale
         output = output.transpose(2, 3)  # [b, n_c, t_c, h, v_dim]
 
@@ -363,7 +382,7 @@ class MultiScaleRetention(nn.Module):
             raise ValueError(f'forward_impl {forward_impl} not supported.')
 
         # concaat heads
-        normed = self.group_norm(retention_out).reshape(B, T, self.v_dim)
+        normed = self.group_norm(retention_out).reshape(B, T, self.value_dim)
         # out gate & proj
         out = self.gate_fn(g) * normed
         out = self.out_proj(out)
@@ -415,6 +434,43 @@ class FeedForwardNetwork(nn.Module):
         return x
 
 
+class GLU(nn.Module):
+
+    def __init__(
+        self,
+        embed_dim,
+        ffn_dim,
+        activation_fn,
+        dropout,
+        activation_dropout,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.activation_fn = get_activation_fn(activation=str(activation_fn))
+        self.activation_dropout_module = torch.nn.Dropout(activation_dropout)
+        self.dropout_module = torch.nn.Dropout(dropout)
+        self.fc1 = nn.Linear(self.embed_dim, ffn_dim, bias=False)
+        self.fc2 = nn.Linear(ffn_dim, self.embed_dim, bias=False)
+        self.gate = nn.Linear(self.embed_dim, ffn_dim, bias=False)
+
+    def reset_parameters(self):
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()
+        self.gate.reset_parameters()
+
+    def forward(self, x):
+        x_shape = x.shape
+        x = x.reshape(-1, x.size(-1))
+        g = self.gate(x)
+        x = self.fc1(x)
+        x = self.activation_fn(x.float()).type_as(x) * g
+        x = self.activation_dropout_module(x)
+        x = self.fc2(x)
+        x = x.view(x_shape)
+        x = self.dropout_module(x)
+        return x
+
+
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
@@ -443,28 +499,25 @@ class RetNetDecoderLayer(nn.Module):
         else:
             self.drop_path = None
 
-        self.retention = MultiScaleRetention(
-            config,
-            value_factor=config.value_factor,
-        )
+        self.retention = MultiScaleRetention(config, use_bias=False)
 
         self.normalize_before = config.decoder_normalize_before
 
-        self.retention_layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.retention_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
 
         self.ffn_dim = config.decoder_ffn_embed_dim
 
-        self.ffn = FeedForwardNetwork(
+        self.ffn = GLU(
             self.embed_dim,
             self.ffn_dim,
             self.config.activation_fn,
             self.config.dropout,
             self.config.activation_dropout,
-            self.config.layernorm_eps,
-            self.config.subln,
+            # self.config.layernorm_eps,
+            # self.config.subln,
         )
 
-        self.final_layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.final_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
 
         if config.deepnorm:
             self.alpha = math.pow(2.0 * config.decoder_layers, 0.25)
@@ -601,7 +654,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.embed_tokens = embed_tokens
 
         if config.layernorm_embedding:
-            self.layernorm_embedding = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layernorm_embedding = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
         else:
             self.layernorm_embedding = None
 
@@ -613,7 +666,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.decoder_layers = len(self.layers)
 
         if config.decoder_normalize_before:
-            self.layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
         else:
             self.layer_norm = None
 
@@ -626,11 +679,11 @@ class RetNetModel(RetNetPreTrainedModel):
                 if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
                     p.data.div_(init_scale)
 
-        if config.subln:
-            init_scale = math.sqrt(math.log(config.decoder_layers * 2))
-            for name, p in self.named_parameters():
-                if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
-                    p.data.mul_(init_scale)
+        # if config.subln:
+        #     init_scale = math.sqrt(math.log(config.decoder_layers * 2))
+        #     for name, p in self.named_parameters():
+        #         if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
+        #             p.data.mul_(init_scale)
 
         self.gradient_checkpointing = False
         self.post_init()
