@@ -5,7 +5,7 @@ from transformers import (Trainer, TrainingArguments, AutoTokenizer, HfArgumentP
 from datasets import load_dataset
 
 from retnet.modeling_retnet import RetNetForCausalLM
-from retnet.configuration_retnet import load_config_from_yaml
+from retnet.configuration_retnet import load_config_from_json
 
 
 @dataclass
@@ -23,7 +23,7 @@ def main():
     train_dataset = load_dataset(args.dataset_name, split="train")
     eval_dataset = load_dataset(args.dataset_name, split="validation")
 
-    config = load_config_from_yaml(f"configs/retnet-{args.model_size}.yml")
+    config = load_config_from_json(f"configs/retnet-{args.model_size}/config.json")
     model = RetNetForCausalLM(config)
 
     tokenizer = AutoTokenizer.from_pretrained('gpt2')
