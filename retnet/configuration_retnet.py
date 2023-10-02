@@ -1,11 +1,11 @@
-import yaml
+import json
 
 from transformers.configuration_utils import PretrainedConfig
 
 
-def load_config_from_yaml(config_file):
+def load_config_from_json(config_file):
     with open(config_file, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+        config = json.load(f)
         config = RetNetConfig.from_dict(config)
     return config
 
