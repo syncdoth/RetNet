@@ -31,31 +31,31 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LanguageConfig(FairseqDataclass):
-    activation_fn: ChoiceEnum(utils.get_available_activation_fns()) = field(
-        default="relu", metadata={"help": "activation function to use"})
+    activation_fn: str = field(default="swish", metadata={"help": "activation function to use"})
     dropout: float = field(default=0.1, metadata={"help": "dropout probability"})
     activation_dropout: float = field(
         default=0.0, metadata={"help": "dropout probability after activation in FFN."})
     relu_dropout: float = field(default=0.0,
                                 metadata={"help": "dropout probability after activation in FFN."})
     decoder_embed_dim: int = field(default=512, metadata={"help": "decoder embedding dimension"})
+    decoder_value_embed_dim: int = field(default=864,
+                                         metadata={"help": "decoder embedding dimension"})
     decoder_output_dim: int = field(default=512, metadata={"help": "decoder output dimension"})
     decoder_input_dim: int = field(default=512, metadata={"help": "decoder input dimension"})
-    decoder_ffn_embed_dim: int = field(default=2048,
+    decoder_ffn_embed_dim: int = field(default=864,
                                        metadata={"help": "decoder embedding dimension for FFN"})
     decoder_layers: int = field(default=6, metadata={"help": "num decoder layers"})
     decoder_retention_heads: int = field(default=2,
                                          metadata={"help": "num decoder retention heads"})
     decoder_normalize_before: bool = field(
-        default=False, metadata={"help": "apply layernorm before each decoder block"})
+        default=False, metadata={"help": "apply norm before each decoder block"})
     share_decoder_input_output_embed: bool = field(
         default=False, metadata={"help": "share decoder input and output embeddings"})
     decoder_learned_pos: bool = field(
         default=False,
         metadata={"help": "use learned positional embeddings in the decoder"},
     )
-    layernorm_embedding: bool = field(default=False,
-                                      metadata={"help": "add layernorm to embedding"})
+    layernorm_embedding: bool = field(default=False, metadata={"help": "add norm to embedding"})
     no_scale_embedding: bool = field(default=False,
                                      metadata={"help": "if True, dont scale embeddings"})
     checkpoint_activations: bool = field(default=False,
@@ -238,14 +238,15 @@ def retnet_base_architecture(args):
     args.dropout = getattr(args, "dropout", 0.0)
 
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 512)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 1024)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 864)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 864)
     args.decoder_layers = getattr(args, "decoder_layers", 6)
     args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 2)
     args.adaptive_softmax_cutoff = getattr(args, "adaptive_softmax_cutoff", None)
     args.adaptive_softmax_dropout = getattr(args, "adaptive_softmax_dropout", 0)
     args.adaptive_softmax_factor = getattr(args, "adaptive_softmax_factor", 4)
     args.decoder_learned_pos = getattr(args, "decoder_learned_pos", False)
-    args.activation_fn = getattr(args, "activation_fn", "gelu")
+    args.activation_fn = getattr(args, "activation_fn", "swish")
 
     args.decoder_layerdrop = getattr(args, "decoder_layerdrop", 0)
     args.decoder_layers_to_keep = getattr(args, "decoder_layers_to_keep", None)
@@ -287,7 +288,8 @@ def retnet_base_architecture(args):
 @register_model_architecture("retnet", "retnet_medium")
 def retnet_medium(args):
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 1024)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 2048)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 1728)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 1728)
     args.decoder_layers = getattr(args, "decoder_layers", 16)
     args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 4)
     retnet_base_architecture(args)
@@ -296,8 +298,9 @@ def retnet_medium(args):
 @register_model_architecture("retnet", "retnet_xl")
 def retnet_xl(args):
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 2048)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 4096)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 8)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 3456)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 3456)
+    args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 8)
     args.decoder_layers = getattr(args, "decoder_layers", 24)
     retnet_base_architecture(args)
 
@@ -305,8 +308,9 @@ def retnet_xl(args):
 @register_model_architecture("retnet", "retnet_3b")
 def retnet_3b(args):
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 2560)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 5120)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 10)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 4280)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 4280)
+    args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 10)
     args.decoder_layers = getattr(args, "decoder_layers", 32)
     retnet_base_architecture(args)
 
@@ -314,8 +318,9 @@ def retnet_3b(args):
 @register_model_architecture("retnet", "retnet_7b")
 def retnet_7b(args):
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 4096)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 8192)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 16)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 6912)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 6912)
+    args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 16)
     args.decoder_layers = getattr(args, "decoder_layers", 32)
     retnet_base_architecture(args)
 
@@ -323,8 +328,9 @@ def retnet_7b(args):
 @register_model_architecture("retnet", "retnet_13b")
 def retnet_13b(args):
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 5120)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 10240)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 20)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 8560)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 8560)
+    args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 20)
     args.decoder_layers = getattr(args, "decoder_layers", 40)
     retnet_base_architecture(args)
 
@@ -332,7 +338,8 @@ def retnet_13b(args):
 @register_model_architecture("retnet", "retnet_65b")
 def retnet_65b(args):
     args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 8192)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 16384)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 32)
+    args.decoder_value_embed_dim = getattr(args, "decoder_value_embed_dim", 13824)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 13824)
+    args.decoder_retention_heads = getattr(args, "decoder_retention_heads", 32)
     args.decoder_layers = getattr(args, "decoder_layers", 64)
     retnet_base_architecture(args)

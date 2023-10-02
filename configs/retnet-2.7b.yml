@@ -1,15 +1,15 @@
 vocab_size: 50257
 decoder_embed_dim: 2560
+decoder_value_embed_dim: 5120
 decoder_layers: 32
 decoder_retention_heads: 10
 decoder_ffn_embed_dim: 5120
 initializer_range: 0.02
-layernorm_eps: 1.0e-5
+layernorm_eps: 1.0e-6
 activation_fn: "gelu"
 dropout: 0.0
 activation_dropout: 0.0
 drop_path_rate: 0.0
-value_factor: 2
 decoder_normalize_before: True
 layernorm_embedding: True
 no_scale_embedding: False
