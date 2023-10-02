@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import json
 
 from transformers.configuration_utils import PretrainedConfig
@@ -9,9 +10,29 @@ def load_config_from_json(config_file):
         config = RetNetConfig.from_dict(config)
     return config
 
-
+@dataclass
 class RetNetConfig(PretrainedConfig):
     model_type = "retnet"
+    initializer_range: float = 0.02
+    activation_fn: str = "gelu"
+    dropout: float = 0.0  # dropout probability
+    activation_dropout: float = 0.0  # dropout probability after activation in FFN.
+    drop_path_rate: float = 0.0
+    decoder_embed_dim: int = 768  # decoder embedding dimension
+    decoder_value_embed_dim: int = 1280  # decoder value embedding dimension
+    decoder_ffn_embed_dim: int = 1280  # decoder embedding dimension for FFN
+    decoder_layers: int = 12  # num decoder layers
+    decoder_retention_heads: int = 3  # num decoder retention heads
+    decoder_normalize_before: bool = True  # apply layernorm before each decoder block
+    layernorm_embedding: bool = False  # add layernorm to embedding
+    no_scale_embedding: bool = True  # if True, dont scale embeddings
+    recurrent_chunk_size: int = 512
+    use_lm_decay: bool = False
+    use_glu: bool = False  # use GLU instead of FFN
+    deepnorm: bool = False
+    subln: bool = True
+    layernorm_eps: float = 1e-6
+    tie_word_embeddings: bool = False
 
     def __init__(
             self,
