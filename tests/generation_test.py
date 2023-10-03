@@ -121,3 +121,10 @@ def test_sampling_temp():
         assert (generated1 == generated2).all(), "recurrent vs parallel"
         assert (generated1 == generated3).all(), "recurrent vs huggingface"
         assert (generated2 == generated3).all(), "parallel vs huggingface"
+
+
+def test_beamsearch():
+    for inputs in test_cases:
+        generate_kwargs = dict(max_new_tokens=20, early_stopping=False, num_beams=4)
+        generated = model.generate(**inputs, **generate_kwargs)
+        # TODO: this just checks if there's no error, but we should check the output

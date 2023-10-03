@@ -1034,10 +1034,10 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         reordered_past = ()
         for layer_past in past_key_values:  # dict
             layer_past_kv = layer_past['prev_key_value']  # [b, h, v_dim / h, qk_dim]
-            layer_past_scale = layer_past['scale']  # [1, h, 1, 1]
+            layer_past_scale = layer_past['scale']  # [b, h, 1, 1]
             reordered_past += ({
                 'prev_key_value': layer_past_kv.index_select(0, beam_idx),
-                'scale': layer_past_scale,
+                'scale': layer_past_scale.index_select(0, beam_idx),
             },)
         return reordered_past
 
