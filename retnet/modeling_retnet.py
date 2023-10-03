@@ -1035,9 +1035,16 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         for layer_past in past_key_values:  # dict
             layer_past_kv = layer_past['prev_key_value']  # [b, h, v_dim / h, qk_dim]
             layer_past_scale = layer_past['scale']  # [b, h, 1, 1]
+            if layer_past_scale.size(0) > 1:
+                # this means that retention_mask is not None, so the scale for
+                # each batch is different. We need to select the correct scale then.
+                # NOTE: during huggingface generate, it will generate attention_mask
+                # if it is None, so this linke will always be true. Still, having
+                # this line here for safety.
+                layer_past_scale = layer_past_scale.index_select(0, beam_idx)
             reordered_past += ({
                 'prev_key_value': layer_past_kv.index_select(0, beam_idx),
-                'scale': layer_past_scale.index_select(0, beam_idx),
+                'scale': layer_past_scale,
             },)
         return reordered_past
 
