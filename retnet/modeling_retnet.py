@@ -162,15 +162,19 @@ class RetNetRelPos(nn.Module):
 
     def compute_decay_scale(self, slen, retention_mask=None):
         exponent = torch.arange(slen, device=self.decay.device).float()
-        decay_scale = self.decay.exp().view(-1, 1)**exponent.view(1, -1)
+        decay_scale = self.decay.exp().view(-1, 1)**exponent.view(1, -1)  # [h, t]
         if retention_mask is not None:
             seqlen = retention_mask.sum(dim=-1)  # [b,]
-            for pos in seqlen:
+            bsz = seqlen.size(0)
+            decay_scale = decay_scale.unsqueeze(0).repeat(bsz, 1, 1)  # [b, h, t]
+            for i, pos in enumerate(seqlen):
                 # the formula for decay_scale is `sum(gamma^i) for i in [0, slen).`
                 # Since the retention_mask is 0 for padding, we can set the decay_scale
                 # to 0 for the padding positions.
-                decay_scale[:, pos.item():] = 0
-        decay_scale = decay_scale.sum(-1).view(1, -1, 1, 1)
+                decay_scale[i, :, pos.item():] = 0
+        else:
+            bsz = 1
+        decay_scale = decay_scale.sum(-1).view(bsz, -1, 1, 1)  # [b, h, 1, 1]
         return decay_scale
 
 
@@ -641,12 +645,15 @@ class RetNetOutputWithPast(ModelOutput):
             sequence_length)`.
 
             Retentions weights, used for visualization.
+
+        attentions (`tuple(torch.FloatTensor)`, *optional*, for backward compatibility. Same as retentions.
     """
 
     last_hidden_state: torch.FloatTensor = None
     past_key_values: Optional[List[Dict[str, torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     retentions: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class RetNetModel(RetNetPreTrainedModel):
@@ -709,10 +716,12 @@ class RetNetModel(RetNetPreTrainedModel):
     def forward_embedding(
         self,
         input_ids,
+        forward_impl,
         inputs_embeds=None,
         past_key_values=None,
     ):
-        if past_key_values is not None:
+        # if past_key_values is not None:
+        if forward_impl == 'recurrent':
             input_ids = input_ids[:, -1:]
 
         if inputs_embeds is None:
@@ -735,6 +744,7 @@ class RetNetModel(RetNetPreTrainedModel):
         past_key_values: Optional[List[Dict[str, torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         output_retentions: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         use_cache: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -742,6 +752,8 @@ class RetNetModel(RetNetPreTrainedModel):
         recurrent_chunk_size: Optional[int] = None,
     ) -> Union[Tuple, RetNetOutputWithPast]:
 
+        if output_retentions is None and output_attentions is not None:
+            output_retentions = output_attentions
         output_retentions = output_retentions if output_retentions is not None else self.config.output_retentions
         output_hidden_states = (output_hidden_states if output_hidden_states is not None else
                                 self.config.output_hidden_states)
@@ -761,10 +773,13 @@ class RetNetModel(RetNetPreTrainedModel):
 
         # embed tokens
         if inputs_embeds is None:
-            inputs_embeds = self.forward_embedding(input_ids, inputs_embeds, past_key_values)
+            inputs_embeds = self.forward_embedding(input_ids, forward_impl, inputs_embeds,
+                                                   past_key_values)
 
         if retention_mask is None and attention_mask is not None:
             retention_mask = attention_mask
+        if retention_mask is not None and forward_impl == 'recurrent':
+            retention_mask = retention_mask[:, -1:]
 
         hidden_states = inputs_embeds
 
@@ -849,6 +864,7 @@ class RetNetModel(RetNetPreTrainedModel):
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             retentions=all_retentions,
+            attentions=all_retentions,
         )
 
 
@@ -878,6 +894,8 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
             sequence_length)`.
 
             Retentions weights, used for visualization.
+
+        attentions (`tuple(torch.FloatTensor)`, *optional*, for backward compatibility. Same as retentions.
     """
 
     loss: Optional[torch.FloatTensor] = None
@@ -885,6 +903,7 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
     past_key_values: Optional[List[Dict[str, torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     retentions: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class RetNetForCausalLM(RetNetPreTrainedModel):
@@ -924,11 +943,14 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_retentions: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = None,
         recurrent_chunk_size: Optional[int] = None,
     ) -> Union[Tuple, RetNetCausalLMOutputWithPast]:
+        if output_retentions is None and output_attentions is not None:
+            output_retentions = output_attentions
         output_retentions = output_retentions if output_retentions is not None else self.config.output_retentions
         output_hidden_states = (output_hidden_states if output_hidden_states is not None else
                                 self.config.output_hidden_states)
@@ -976,7 +998,55 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             retentions=outputs.retentions,
+            attentions=outputs.retentions,
         )
+
+    def _crop_past_key_values(model, past_key_values, maximum_length):
+        """Since retnet's kv do not have length, no need to crop. Just return"""
+        return past_key_values
+
+    def prepare_inputs_for_generation(self,
+                                      input_ids,
+                                      past_key_values=None,
+                                      attention_mask=None,
+                                      inputs_embeds=None,
+                                      **kwargs):
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {"input_ids": input_ids}
+
+        forward_impl = kwargs.get("forward_impl", "parallel")
+        if past_key_values is not None:
+            forward_impl = 'recurrent'
+
+        model_inputs.update({
+            "past_key_values": past_key_values,
+            "use_cache": kwargs.get("use_cache"),
+            "attention_mask": attention_mask,
+            "forward_impl": forward_impl,
+        })
+        return model_inputs
+
+    @staticmethod
+    def _reorder_cache(past_key_values, beam_idx):
+        reordered_past = ()
+        for layer_past in past_key_values:  # dict
+            layer_past_kv = layer_past['prev_key_value']  # [b, h, v_dim / h, qk_dim]
+            layer_past_scale = layer_past['scale']  # [b, h, 1, 1]
+            if layer_past_scale.size(0) > 1:
+                # this means that retention_mask is not None, so the scale for
+                # each batch is different. We need to select the correct scale then.
+                # NOTE: during huggingface generate, it will generate attention_mask
+                # if it is None, so this linke will always be true. Still, having
+                # this line here for safety.
+                layer_past_scale = layer_past_scale.index_select(0, beam_idx)
+            reordered_past += ({
+                'prev_key_value': layer_past_kv.index_select(0, beam_idx),
+                'scale': layer_past_scale,
+            },)
+        return reordered_past
 
     def sample_token(self, logit, do_sample=False, top_k=1, top_p=1.0, temperature=1.0):
         if not do_sample:
@@ -985,7 +1055,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         return torch.multinomial(torch.softmax(filtered, dim=-1), num_samples=1)
 
     @torch.inference_mode()
-    def generate(
+    def custom_generate(
         self,
         input_ids: torch.LongTensor = None,
         retention_mask: Optional[torch.Tensor] = None,
@@ -1017,8 +1087,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
             else:
                 past_key_values = None
                 for p_i in range(input_ids.shape[1] - 1):
-                    ret_mask = retention_mask[:,
-                                              p_i:p_i + 1] if retention_mask is not None else None
+                    ret_mask = retention_mask[:, :p_i + 1] if retention_mask is not None else None
                     outputs = self(input_ids[:, :p_i + 1],
                                    retention_mask=ret_mask,
                                    forward_impl='recurrent',
@@ -1034,6 +1103,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
 
         for i in range(max_new_tokens):
             outputs = self(generated,
+                           retention_mask=retention_mask,
                            forward_impl='recurrent',
                            past_key_values=past_key_values,
                            use_cache=True,
@@ -1046,6 +1116,8 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
                                       top_p=top_p,
                                       temperature=temperature)
             generated = torch.cat([generated, token], dim=-1)
+            if retention_mask is not None:
+                retention_mask = torch.cat([retention_mask, torch.ones_like(token)], dim=-1)
             if early_stopping and (token == eos_token_id).all():
                 break
         return generated
