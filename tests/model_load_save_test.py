@@ -13,6 +13,7 @@ from torchscale.config import RetNetConfig as TSRetNetConfig
 my_config = RetNetConfig(
     decoder_layers=2,
     decoder_embed_dim=128,
+    decoder_value_embed_dim=256,
     decoder_ffn_embed_dim=256,
     decoder_retention_heads=2,
     vocab_size=50257,
@@ -22,6 +23,7 @@ my_retnet = RetNetModel(my_config)
 ts_config = TSRetNetConfig(
     decoder_layers=2,
     decoder_embed_dim=128,
+    decoder_value_embed_dim=256,
     decoder_ffn_embed_dim=256,
     decoder_retention_heads=2,
     vocab_size=50257,

@@ -18,6 +18,7 @@ from convert_weights import main as convert_weight
 ts_config = TSRetNetConfig(
     decoder_layers=6,
     decoder_embed_dim=128,
+    decoder_value_embed_dim=256,
     decoder_ffn_embed_dim=256,
     decoder_retention_heads=2,
     recurrent_chunk_size=2,
@@ -34,7 +35,7 @@ convert_weight('ts_retnet.pth', 'hf_retnet/pytorch_model.bin')
 os.remove('ts_retnet.pth')
 
 # 1. load weight
-my_config = RetNetConfig(tie_word_embeddings=False)
+my_config = RetNetConfig()
 my_config.override(ts_config)
 my_retnet = RetNetForCausalLM(my_config)
 

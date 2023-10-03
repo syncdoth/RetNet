@@ -61,10 +61,10 @@ chunk_cache = chunk_outputs.past_key_values
 ```python
 import torch
 from retnet.modeling_retnet import RetNetForCausalLM
-from retnet.configuration_retnet import load_config_from_yaml
+from retnet.configuration_retnet import load_config_from_json
 from transformers import AutoTokenizer
 
-config = load_config_from_yaml('configs/retnet-1.3b.yml')
+config = load_config_from_json('configs/retnet-base/config.json')
 model = RetNetForCausalLM(config)
 
 tokenizer = AutoTokenizer.from_pretrained("gpt2")

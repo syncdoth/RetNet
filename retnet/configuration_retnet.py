@@ -1,11 +1,11 @@
-import yaml
+import json
 
 from transformers.configuration_utils import PretrainedConfig
 
 
-def load_config_from_yaml(config_file):
+def load_config_from_json(config_file):
     with open(config_file, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+        config = json.load(f)
         config = RetNetConfig.from_dict(config)
     return config
 
@@ -28,26 +28,29 @@ class RetNetConfig(PretrainedConfig):
             activation_dropout: float = 0.0,  # dropout probability after activation in FFN.
             drop_path_rate: float = 0.0,
             decoder_embed_dim: int = 768,  # decoder embedding dimension
-            value_factor: int = 2,
-            decoder_ffn_embed_dim: int = 1536,  # decoder embedding dimension for FFN
+            decoder_value_embed_dim: int = 1280,  # decoder value embedding dimension
+            decoder_ffn_embed_dim: int = 1280,  # decoder embedding dimension for FFN
             decoder_layers: int = 12,  # num decoder layers
-            decoder_retention_heads: int = 2,  # num decoder retention heads
+            decoder_retention_heads: int = 3,  # num decoder retention heads
             decoder_normalize_before: bool = True,  # apply layernorm before each decoder block
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = True,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
+            use_glu: bool = False,  # use GLU instead of FFN
             use_lm_decay: bool = False,
             deepnorm: bool = False,
             subln: bool = True,
-            layernorm_eps: float = 1e-5,
+            layernorm_eps: float = 1e-6,
+            tie_word_embeddings: bool = False,
             **kwargs):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
         self.output_retentions = output_retentions
         self.use_lm_decay = use_lm_decay
+        self.use_glu = use_glu
         # size related
         self.decoder_embed_dim = decoder_embed_dim
-        self.value_factor = value_factor
+        self.decoder_value_embed_dim = decoder_value_embed_dim
         self.decoder_retention_heads = decoder_retention_heads
         self.decoder_ffn_embed_dim = decoder_ffn_embed_dim
         self.decoder_layers = decoder_layers
@@ -77,6 +80,7 @@ class RetNetConfig(PretrainedConfig):
                          pad_token_id=pad_token_id,
                          eos_token_id=eos_token_id,
                          use_cache=use_cache,
+                         tie_word_embeddings=tie_word_embeddings,
                          **kwargs)
 
     def override(self, args):

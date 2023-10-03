@@ -40,6 +40,27 @@ def get_activation_fn(activation):
         raise NotImplementedError
 
 
+class RMSNorm(nn.Module):
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
+        super().__init__()
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(dim))
+        else:
+            self.register_parameter('weight', None)
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        if self.weight is not None:
+            output = output * self.weight
+        return output
+
+
 class RetNetRelPos(nn.Module):
 
     def __init__(self, config):
@@ -70,14 +91,19 @@ class RetNetRelPos(nn.Module):
                                      float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
             mask = torch.nan_to_num(mask)
+
+            value_inner_decay = mask[:, -1] / mask[:, -1].sum(dim=-1, keepdim=True)
+            value_inner_decay = value_inner_decay.unsqueeze(-1)
             scale = mask.sum(dim=-1, keepdim=True).sqrt()
-            mask = mask / scale
+            inner_mask = mask / scale
 
             cross_decay = torch.exp(self.decay * self.recurrent_chunk_size)
-            inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
+            query_inner_decay = torch.exp(self.decay[:, None] * (block_index + 1))
+            query_inner_decay = query_inner_decay[:, :, None] / (
+                scale / mask[:, -1].sum(dim=-1)[:, None, None])
             cross_decay = cross_decay[:, None, None]
-            inner_decay = inner_decay[:, :, None] / (scale / scale[:, -1, None])
-            retention_rel_pos = ((sin, cos), (mask, cross_decay, inner_decay))
+            retention_rel_pos = ((sin, cos), (inner_mask, cross_decay, query_inner_decay,
+                                              value_inner_decay))
         else:
             index = torch.arange(slen).to(self.decay)
             sin = torch.sin(index[:, None] * self.angle[None, :])
@@ -98,31 +124,29 @@ class MultiScaleRetention(nn.Module):
         self,
         config,
         embed_dim,
+        value_dim,
         num_heads,
-        value_factor=2,
         gate_fn="swish",
     ):
         super().__init__()
         self.config = config
-        self.factor = value_factor
         self.embed_dim = embed_dim
+        self.value_dim = value_dim
         self.num_heads = num_heads
-        self.head_dim = self.embed_dim * self.factor // num_heads
+        self.head_dim = self.value_dim // num_heads
         self.key_dim = self.embed_dim // num_heads
         self.scaling = self.key_dim**-0.5
 
         self.gate_fn = get_activation_fn(activation=str(gate_fn))
 
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.v_proj = nn.Linear(embed_dim, embed_dim * self.factor, bias=True)
-        self.g_proj = nn.Linear(embed_dim, embed_dim * self.factor, bias=True)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.v_proj = nn.Linear(embed_dim, value_dim, bias=False)
+        self.g_proj = nn.Linear(embed_dim, value_dim, bias=False)
 
-        self.out_proj = nn.Linear(embed_dim * self.factor, embed_dim, bias=True)
+        self.out_proj = nn.Linear(value_dim, embed_dim, bias=False)
 
-        self.group_norm = LayerNorm(self.head_dim,
-                                    eps=config.layernorm_eps,
-                                    elementwise_affine=False)
+        self.group_norm = RMSNorm(self.head_dim, eps=config.layernorm_eps, elementwise_affine=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -131,7 +155,6 @@ class MultiScaleRetention(nn.Module):
         nn.init.xavier_uniform_(self.v_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.g_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.out_proj.weight)
-        nn.init.constant_(self.out_proj.bias, 0.0)
 
     def parallel_forward(self, qr, kr, v, mask):
         bsz, tgt_len, embed_dim = v.size()
@@ -168,7 +191,7 @@ class MultiScaleRetention(nn.Module):
         return output
 
     def chunk_recurrent_forward(self, qr, kr, v, inner_mask):
-        mask, cross_decay, inner_decay = inner_mask
+        mask, cross_decay, query_inner_decay, value_inner_decay = inner_mask
         bsz, tgt_len, embed_dim = v.size()
         chunk_len = mask.size(1)
         num_chunks = tgt_len // chunk_len
@@ -189,8 +212,7 @@ class MultiScaleRetention(nn.Module):
                                     v)  # bsz * num_heads * num_value_heads * chunk_len * head_dim
 
         # reduce kv in one chunk
-        kv = kr_t @ (v * mask[:, -1, :, None])
-        kv = kv.view(bsz, num_chunks, self.num_heads, self.key_dim, self.head_dim)
+        kv = kr_t @ (v * value_inner_decay)
 
         kv_recurrent = []
         cross_scale = []
@@ -212,7 +234,7 @@ class MultiScaleRetention(nn.Module):
         align_inner_scale = all_scale / inner_scale
         align_cross_scale = all_scale / cross_scale
 
-        cross_output = (qr * inner_decay) @ kv_recurrent
+        cross_output = (qr * query_inner_decay) @ kv_recurrent
         output = inner_output / align_inner_scale + cross_output / align_cross_scale
         # output = inner_output / cross_scale + cross_output / inner_scale
 
@@ -292,6 +314,43 @@ class FeedForwardNetwork(nn.Module):
         return x
 
 
+class GLU(nn.Module):
+
+    def __init__(
+        self,
+        embed_dim,
+        ffn_dim,
+        activation_fn,
+        dropout,
+        activation_dropout,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.activation_fn = get_activation_fn(activation=str(activation_fn))
+        self.activation_dropout_module = torch.nn.Dropout(activation_dropout)
+        self.dropout_module = torch.nn.Dropout(dropout)
+        self.fc1 = nn.Linear(self.embed_dim, ffn_dim, bias=False)
+        self.fc2 = nn.Linear(ffn_dim, self.embed_dim, bias=False)
+        self.gate = nn.Linear(self.embed_dim, ffn_dim, bias=False)
+
+    def reset_parameters(self):
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()
+        self.gate.reset_parameters()
+
+    def forward(self, x):
+        x_shape = x.shape
+        x = x.reshape(-1, x.size(-1))
+        g = self.gate(x)
+        x = self.fc1(x)
+        x = self.activation_fn(x.float()).type_as(x) * g
+        x = self.activation_dropout_module(x)
+        x = self.fc2(x)
+        x = x.view(x_shape)
+        x = self.dropout_module(x)
+        return x
+
+
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
@@ -327,31 +386,44 @@ class RetNetDecoderLayer(nn.Module):
         self.retention = MultiScaleRetention(
             config,
             self.embed_dim,
+            config.decoder_value_embed_dim,
             config.decoder_retention_heads,
         )
 
         self.normalize_before = config.decoder_normalize_before
 
-        self.retention_layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.retention_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
 
         self.ffn_dim = config.decoder_ffn_embed_dim
 
-        self.ffn = FeedForwardNetwork(
-            self.embed_dim,
-            self.ffn_dim,
-            self.config.activation_fn,
-            self.config.dropout,
-            self.config.activation_dropout,
-            self.config.layernorm_eps,
-            self.config.subln,
-        )
+        self.ffn = self.build_ffn()
 
-        self.final_layer_norm = LayerNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.final_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
 
         if config.deepnorm:
             self.alpha = math.pow(2.0 * config.decoder_layers, 0.25)
         else:
             self.alpha = 1.0
+
+    def build_ffn(self):
+        if self.config.use_glu:
+            return GLU(
+                self.embed_dim,
+                self.ffn_dim,
+                self.config.activation_fn,
+                self.config.dropout,
+                self.config.activation_dropout,
+            )
+        else:
+            return FeedForwardNetwork(
+                self.embed_dim,
+                self.ffn_dim,
+                self.config.activation_fn,
+                self.config.dropout,
+                self.config.activation_dropout,
+                self.config.layernorm_eps,
+                self.config.subln,
+            )
 
     def residual_connection(self, x, residual):
         return residual * self.alpha + x
@@ -418,7 +490,7 @@ class RetNetModel(nn.Module):
             self.output_projection = output_projection
 
         if config.layernorm_embedding:
-            self.layernorm_embedding = LayerNorm(embed_dim, eps=config.layernorm_eps)
+            self.layernorm_embedding = RMSNorm(embed_dim, eps=config.layernorm_eps)
         else:
             self.layernorm_embedding = None
 
@@ -433,7 +505,7 @@ class RetNetModel(nn.Module):
         self.num_layers = len(self.layers)
 
         if config.decoder_normalize_before:
-            self.layer_norm = LayerNorm(embed_dim, eps=config.layernorm_eps)
+            self.layer_norm = RMSNorm(embed_dim, eps=config.layernorm_eps)
         else:
             self.layer_norm = None
 
@@ -447,7 +519,7 @@ class RetNetModel(nn.Module):
                 if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
                     p.data.div_(init_scale)
 
-        if config.subln:
+        if config.subln and not config.use_glu:
             init_scale = math.sqrt(math.log(config.decoder_layers * 2))
             for name, p in self.named_parameters():
                 if ("fc1" in name or "fc2" in name or "out_proj" in name or "v_proj" in name):
