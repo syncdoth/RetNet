@@ -1,0 +1,7 @@
+torch  # better install it using conda: check https://pytorch.org/get-started/locally/
+transformers
+numpy
+apex  # better install it from source: https://github.com/NVIDIA/apex
+timm
+pytest
+fire
