@@ -56,6 +56,7 @@ class RMSNorm(nn.Module):
 
     def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
         super().__init__()
+        self.normalized_shape = dim
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if self.elementwise_affine:
@@ -92,6 +93,11 @@ class RetNetRelPos(nn.Module):
         self.register_buffer("angle", angle)
         self.register_buffer("decay", decay)
         self.recurrent_chunk_size = config.recurrent_chunk_size
+
+        # TODO
+        self.num_heads = num_heads
+        self.proj = nn.Linear(self.num_heads, self.num_heads, bias=False)
+        self.proj.weight = nn.Parameter(torch.eye(self.num_heads), requires_grad=False)
 
     def forward(self,
                 slen,
@@ -156,6 +162,10 @@ class RetNetRelPos(nn.Module):
                 intra_decay = mask[range(mask.shape[0]), :, max_non_zero]
             else:
                 intra_decay = mask[:, :, -1]
+
+            # TODO:
+            mask = self.proj(mask.transpose(-1, -3)).transpose(-3, -1)
+            intra_decay = self.proj(intra_decay.transpose(-1, -2)).transpose(-2, -1)
 
             retention_rel_pos = ((sin, cos), (mask, intra_decay, decay_scale))
 
