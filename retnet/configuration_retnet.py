@@ -30,6 +30,7 @@ class RetNetConfig(PretrainedConfig):
     recurrent_chunk_size: int = 512
     use_lm_decay: bool = False
     use_glu: bool = False  # use GLU instead of FFN
+    z_loss_coeff: float = 0.0  # coefficient for z loss: TODO: 1e-4
     deepnorm: bool = False
     subln: bool = True
     use_ffn_rms_norm: bool = False
@@ -60,6 +61,7 @@ class RetNetConfig(PretrainedConfig):
             no_scale_embedding: bool = True,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
             use_glu: bool = False,  # use GLU instead of FFN
+            z_loss_coeff: float = 0.0,  # coefficient for z loss: TODO: 1e-4
             use_lm_decay: bool = False,
             deepnorm: bool = False,
             subln: bool = True,
@@ -72,6 +74,7 @@ class RetNetConfig(PretrainedConfig):
         self.output_retentions = output_retentions
         self.use_lm_decay = use_lm_decay
         self.use_glu = use_glu
+        self.z_loss_coeff = z_loss_coeff
         # size related
         self.decoder_embed_dim = decoder_embed_dim
         self.decoder_value_embed_dim = decoder_value_embed_dim

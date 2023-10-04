@@ -721,6 +721,12 @@ class RetNetForCausalLM(nn.Module):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
+            if self.config.z_loss_coeff > 0:
+                # z_loss from PaLM paper
+                # z_loss = 1e-4 * log(log(z)), where z = sum(exp(logits))
+                z_loss = torch.logsumexp(shift_logits, dim=-1).log().mean()
+                loss += self.config.z_loss_coeff * z_loss
+
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
