@@ -10,6 +10,7 @@ def load_config_from_json(config_file):
         config = RetNetConfig.from_dict(config)
     return config
 
+
 @dataclass
 class RetNetConfig(PretrainedConfig):
     model_type = "retnet"
@@ -31,6 +32,7 @@ class RetNetConfig(PretrainedConfig):
     use_glu: bool = False  # use GLU instead of FFN
     deepnorm: bool = False
     subln: bool = True
+    use_ffn_rms_norm: bool = False
     layernorm_eps: float = 1e-6
     tie_word_embeddings: bool = False
 
@@ -61,6 +63,7 @@ class RetNetConfig(PretrainedConfig):
             use_lm_decay: bool = False,
             deepnorm: bool = False,
             subln: bool = True,
+            use_ffn_rms_norm: bool = False,  # use RMSNorm instead of LayerNorm in FFN
             layernorm_eps: float = 1e-6,
             tie_word_embeddings: bool = False,
             **kwargs):
@@ -85,6 +88,7 @@ class RetNetConfig(PretrainedConfig):
         self.layernorm_embedding = layernorm_embedding
         self.deepnorm = deepnorm
         self.subln = subln
+        self.use_ffn_rms_norm = use_ffn_rms_norm
         self.layernorm_eps = layernorm_eps
         # Blockwise
         self.recurrent_chunk_size = recurrent_chunk_size

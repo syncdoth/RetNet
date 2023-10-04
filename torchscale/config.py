@@ -30,6 +30,7 @@ class RetNetConfig(object):
         self.max_rel_pos = kwargs.pop("max_rel_pos", 0)
         self.deepnorm = kwargs.pop("deepnorm", False)
         self.subln = kwargs.pop("subln", True)
+        self.use_ffn_rms_norm = kwargs.pop("use_ffn_rms_norm", False)
         self.use_glu = kwargs.pop("use_glu", False)
         self.multiway = kwargs.pop("multiway", False)
         self.share_decoder_input_output_embed = kwargs.pop("share_decoder_input_output_embed",

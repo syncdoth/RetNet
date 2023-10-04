@@ -409,6 +409,7 @@ class FeedForwardNetwork(nn.Module):
         activation_dropout,
         layernorm_eps,
         subln=False,
+        use_rms_norm=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -417,7 +418,13 @@ class FeedForwardNetwork(nn.Module):
         self.dropout_module = torch.nn.Dropout(dropout)
         self.fc1 = nn.Linear(self.embed_dim, ffn_dim)
         self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
-        self.ffn_layernorm = LayerNorm(ffn_dim, eps=layernorm_eps) if subln else None
+        if subln:
+            if use_rms_norm:
+                self.ffn_layernorm = RMSNorm(self.embed_dim, eps=layernorm_eps)
+            else:
+                self.ffn_layernorm = LayerNorm(self.embed_dim, eps=layernorm_eps)
+        else:
+            self.ffn_layernorm = None
 
     def reset_parameters(self):
         self.fc1.reset_parameters()
@@ -539,6 +546,7 @@ class RetNetDecoderLayer(nn.Module):
                 self.config.activation_dropout,
                 self.config.layernorm_eps,
                 self.config.subln,
+                self.config.use_ffn_rms_norm,
             )
 
     def residual_connection(self, x, residual):
