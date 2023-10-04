@@ -32,6 +32,7 @@ class RetNetConfig(object):
         self.subln = kwargs.pop("subln", True)
         self.use_ffn_rms_norm = kwargs.pop("use_ffn_rms_norm", False)
         self.use_glu = kwargs.pop("use_glu", False)
+        self.use_lm_decay = kwargs.pop("use_lm_decay", False)
         self.z_loss_coeff = kwargs.pop("z_loss_coeff", 0.0)  # TODO: 1e-4
         self.multiway = kwargs.pop("multiway", False)
         self.share_decoder_input_output_embed = kwargs.pop("share_decoder_input_output_embed",
