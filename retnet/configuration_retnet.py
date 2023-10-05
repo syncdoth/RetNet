@@ -29,7 +29,7 @@ class RetNetConfig(PretrainedConfig):
     no_scale_embedding: bool = True  # if True, dont scale embeddings
     recurrent_chunk_size: int = 512
     use_lm_decay: bool = False
-    use_glu: bool = False  # use GLU instead of FFN
+    use_glu: bool = True  # use GLU instead of FFN
     z_loss_coeff: float = 0.0  # coefficient for z loss: TODO: 1e-4
     deepnorm: bool = False
     subln: bool = True
@@ -60,7 +60,7 @@ class RetNetConfig(PretrainedConfig):
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = True,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
-            use_glu: bool = False,  # use GLU instead of FFN
+            use_glu: bool = True,  # use GLU instead of FFN
             z_loss_coeff: float = 0.0,  # coefficient for z loss: TODO: 1e-4
             use_lm_decay: bool = False,
             deepnorm: bool = False,

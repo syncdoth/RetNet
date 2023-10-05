@@ -31,7 +31,7 @@ class RetNetConfig(object):
         self.deepnorm = kwargs.pop("deepnorm", False)
         self.subln = kwargs.pop("subln", True)
         self.use_ffn_rms_norm = kwargs.pop("use_ffn_rms_norm", False)
-        self.use_glu = kwargs.pop("use_glu", False)
+        self.use_glu = kwargs.pop("use_glu", True)
         self.use_lm_decay = kwargs.pop("use_lm_decay", False)
         self.z_loss_coeff = kwargs.pop("z_loss_coeff", 0.0)  # TODO: 1e-4
         self.multiway = kwargs.pop("multiway", False)
