@@ -65,11 +65,17 @@ class RetNetRelPos(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        angle = 1.0 / (10000**torch.linspace(
-            0, 1, config.decoder_embed_dim // config.decoder_retention_heads // 2))
+        num_heads = config.decoder_retention_heads
+
+        angle = 1.0 / (10000**torch.linspace(0, 1, config.decoder_embed_dim // num_heads // 2))
         angle = angle.unsqueeze(-1).repeat(1, 2).flatten()
-        decay = torch.log(1 -
-                          2**(-5 - torch.arange(config.decoder_retention_heads, dtype=torch.float)))
+        if config.use_lm_decay:
+            # NOTE: alternative way described in the paper
+            s = torch.log(torch.tensor(1 / 32))
+            e = torch.log(torch.tensor(1 / 512))
+            decay = torch.log(1 - torch.exp(torch.linspace(s, e, num_heads)))  # [h,]
+        else:
+            decay = torch.log(1 - 2**(-5 - torch.arange(num_heads, dtype=torch.float)))
         self.register_buffer("angle", angle)
         self.register_buffer("decay", decay)
         self.recurrent_chunk_size = config.recurrent_chunk_size
@@ -284,6 +290,7 @@ class FeedForwardNetwork(nn.Module):
         activation_dropout,
         layernorm_eps,
         subln=False,
+        use_rms_norm=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -292,7 +299,13 @@ class FeedForwardNetwork(nn.Module):
         self.dropout_module = torch.nn.Dropout(dropout)
         self.fc1 = nn.Linear(self.embed_dim, ffn_dim)
         self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
-        self.ffn_layernorm = LayerNorm(ffn_dim, eps=layernorm_eps) if subln else None
+        if subln:
+            if use_rms_norm:
+                self.ffn_layernorm = RMSNorm(self.embed_dim, eps=layernorm_eps)
+            else:
+                self.ffn_layernorm = LayerNorm(self.embed_dim, eps=layernorm_eps)
+        else:
+            self.ffn_layernorm = None
 
     def reset_parameters(self):
         self.fc1.reset_parameters()
@@ -423,6 +436,7 @@ class RetNetDecoderLayer(nn.Module):
                 self.config.activation_dropout,
                 self.config.layernorm_eps,
                 self.config.subln,
+                self.config.use_ffn_rms_norm,
             )
 
     def residual_connection(self, x, residual):
@@ -712,6 +726,12 @@ class RetNetForCausalLM(nn.Module):
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
+
+            if self.config.z_loss_coeff > 0:
+                # z_loss from PaLM paper
+                # z_loss = 1e-4 * log(log(z)), where z = sum(exp(logits))
+                z_loss = torch.logsumexp(shift_logits, dim=-1).log().mean()
+                loss += self.config.z_loss_coeff * z_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]

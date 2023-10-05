@@ -141,8 +141,8 @@ def get_config(size, args=None):
 
 
 def main(**kwargs):
-    args = Namespace(**kwargs) if kwargs else None
     for size in ['base', 'medium', 'xl', '3b', '7b', '13b', '65b']:
+        args = Namespace(**kwargs) if kwargs else None
         config = get_config(size, args=args)
         config.save_pretrained('configs/retnet-' + size)
 
