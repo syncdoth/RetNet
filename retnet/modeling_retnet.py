@@ -129,7 +129,10 @@ class RetNetRelPos(nn.Module):
             query_inner_decay = query_inner_decay[None, :, :, None] / (
                 scale / mask[:, :, -1].sum(dim=-1)[:, :, None, None])
             # decay_scale (used for kv cache)
-            decay_scale = self.compute_decay_scale(slen, retention_mask)
+            if not self.training:
+                decay_scale = self.compute_decay_scale(slen, retention_mask)
+            else:
+                decay_scale = None
             retention_rel_pos = ((sin, cos), (inner_mask, cross_decay, query_inner_decay,
                                               value_inner_decay, decay_scale))
         else:  # parallel
@@ -149,7 +152,10 @@ class RetNetRelPos(nn.Module):
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
             mask = torch.nan_to_num(mask, nan=0.0)
             # decay_scale (used for kv cache)
-            decay_scale = self.compute_decay_scale(slen, retention_mask)
+            if not self.training:
+                decay_scale = self.compute_decay_scale(slen, retention_mask)
+            else:
+                decay_scale = None
             # mask processing for intra decay
             if retention_mask is not None:
                 max_non_zero = torch.cumsum(retention_mask, dim=-1).max(dim=-1).indices  # [b,]
@@ -232,6 +238,9 @@ class MultiScaleRetention(nn.Module):
 
         output = retention @ v  # [b, h, t, v_dim / h]
         output = output.transpose(1, 2)  # [b, t, h, v_dim / h]
+
+        if self.training:  # skip cache
+            return output, None, retention
 
         # kv cache: [b, h, t, v_dim, qk_dim]
         current_kv = k.unsqueeze(-2) * v.unsqueeze(-1)
