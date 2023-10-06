@@ -78,6 +78,7 @@ class RetNetRelPos(nn.Module):
 
     def __init__(self, config: RetNetConfig):
         super().__init__()
+        self.config = config
         num_heads = config.decoder_retention_heads
 
         angle = 1.0 / (10000**torch.linspace(0, 1, config.decoder_embed_dim // num_heads // 2))
@@ -94,16 +95,12 @@ class RetNetRelPos(nn.Module):
         self.register_buffer("decay", decay)
         self.recurrent_chunk_size = config.recurrent_chunk_size
 
-        # TODO
-        self.num_heads = num_heads
-        self.proj = nn.Linear(self.num_heads, self.num_heads, bias=False)
-        self.proj.weight = nn.Parameter(torch.eye(self.num_heads), requires_grad=False)
-
     def forward(self,
                 slen,
                 forward_impl='parallel',
                 recurrent_chunk_size=None,
-                retention_mask=None):
+                retention_mask=None,
+                get_decay_scale=True):
         if forward_impl == 'recurrent':
             sin = torch.sin(self.angle * (slen - 1))
             cos = torch.cos(self.angle * (slen - 1))
@@ -135,7 +132,10 @@ class RetNetRelPos(nn.Module):
             query_inner_decay = query_inner_decay[None, :, :, None] / (
                 scale / mask[:, :, -1].sum(dim=-1)[:, :, None, None])
             # decay_scale (used for kv cache)
-            decay_scale = self.compute_decay_scale(slen, retention_mask)
+            if get_decay_scale:
+                decay_scale = self.compute_decay_scale(slen, retention_mask)
+            else:
+                decay_scale = None
             retention_rel_pos = ((sin, cos), (inner_mask, cross_decay, query_inner_decay,
                                               value_inner_decay, decay_scale))
         else:  # parallel
@@ -149,23 +149,22 @@ class RetNetRelPos(nn.Module):
             mask = mask.unsqueeze(0)  # [1, h, t, t]
             if retention_mask is not None:
                 # this is required for left padding
-                mask = mask * retention_mask.float().view(-1, 1, 1, slen)
+                mask = mask * retention_mask.float().view(-1, 1, 1, slen).to(mask)
 
             # scaling
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
             mask = torch.nan_to_num(mask, nan=0.0)
             # decay_scale (used for kv cache)
-            decay_scale = self.compute_decay_scale(slen, retention_mask)
+            if get_decay_scale:
+                decay_scale = self.compute_decay_scale(slen, retention_mask)
+            else:
+                decay_scale = None
             # mask processing for intra decay
             if retention_mask is not None:
                 max_non_zero = torch.cumsum(retention_mask, dim=-1).max(dim=-1).indices  # [b,]
                 intra_decay = mask[range(mask.shape[0]), :, max_non_zero]
             else:
                 intra_decay = mask[:, :, -1]
-
-            # TODO:
-            mask = self.proj(mask.transpose(-1, -3)).transpose(-3, -1)
-            intra_decay = self.proj(intra_decay.transpose(-1, -2)).transpose(-2, -1)
 
             retention_rel_pos = ((sin, cos), (mask, intra_decay, decay_scale))
 
@@ -218,6 +217,8 @@ class MultiScaleRetention(nn.Module):
         self.group_norm = RMSNorm(self.head_dim, eps=config.layernorm_eps, elementwise_affine=False)
         self.reset_parameters()
 
+        self.decay_proj = nn.Linear(self.num_heads, self.num_heads, bias=False)
+
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.q_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.k_proj.weight, gain=2**-2.5)
@@ -233,6 +234,11 @@ class MultiScaleRetention(nn.Module):
         decay_mask,  # (1 or bsz) * num_head * len * len
         """
         decay_mask, intra_decay, scale = decay_mask
+        # just return retention_rel_pos projected
+        # TODO: for shardformer
+        decay_mask = self.decay_proj(decay_mask.transpose(-1, -3)).transpose(-3, -1)
+        intra_decay = self.decay_proj(intra_decay.transpose(-1, -2)).transpose(-2, -1)
+
         # [b, h, t, t]
         retention = q @ k.transpose(-1, -2)  # (scaled dot-product)
         retention = retention * decay_mask
@@ -242,6 +248,9 @@ class MultiScaleRetention(nn.Module):
 
         output = retention @ v  # [b, h, t, v_dim / h]
         output = output.transpose(1, 2)  # [b, t, h, v_dim / h]
+
+        if self.training:  # skip cache
+            return output, None, retention
 
         # kv cache: [b, h, t, v_dim, qk_dim]
         current_kv = k.unsqueeze(-2) * v.unsqueeze(-1)
@@ -261,7 +270,7 @@ class MultiScaleRetention(nn.Module):
         retention_mask # bsz * 1
         """
         if retention_mask is not None:
-            retention_mask = retention_mask.float().view(-1, 1, 1, 1)
+            retention_mask = retention_mask.float().view(-1, 1, 1, 1).to(decay)
         else:
             retention_mask = torch.ones(k.size(0), 1, 1, 1).to(decay)
         # (b, h, v_dim, qk_dim)
@@ -769,6 +778,7 @@ class RetNetModel(RetNetPreTrainedModel):
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = 'parallel',
         recurrent_chunk_size: Optional[int] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[Tuple, RetNetOutputWithPast]:
 
         if output_retentions is None and output_attentions is not None:
@@ -814,10 +824,12 @@ class RetNetModel(RetNetPreTrainedModel):
         else:
             slen = seq_length
         # relative position
-        retention_rel_pos = self.retnet_rel_pos(slen,
-                                                forward_impl=forward_impl,
-                                                recurrent_chunk_size=recurrent_chunk_size,
-                                                retention_mask=retention_mask)
+        if retention_rel_pos is None:
+            retention_rel_pos = self.retnet_rel_pos(slen,
+                                                    forward_impl=forward_impl,
+                                                    recurrent_chunk_size=recurrent_chunk_size,
+                                                    retention_mask=retention_mask,
+                                                    get_decay_scale=not self.training)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -967,6 +979,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = None,
         recurrent_chunk_size: Optional[int] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[Tuple, RetNetCausalLMOutputWithPast]:
         if output_retentions is None and output_attentions is not None:
             output_retentions = output_attentions
@@ -989,7 +1002,8 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
                              return_dict=return_dict,
                              forward_impl=forward_impl,
                              use_cache=use_cache,
-                             recurrent_chunk_size=recurrent_chunk_size)
+                             recurrent_chunk_size=recurrent_chunk_size,
+                             retention_rel_pos=retention_rel_pos)
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
@@ -1180,6 +1194,7 @@ class RetNetForSequenceClassification(RetNetPreTrainedModel):
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = None,
         recurrent_chunk_size: Optional[int] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
 
         if output_retentions is None and output_attentions is not None:
@@ -1203,7 +1218,8 @@ class RetNetForSequenceClassification(RetNetPreTrainedModel):
                              return_dict=return_dict,
                              forward_impl=forward_impl,
                              use_cache=use_cache,
-                             recurrent_chunk_size=recurrent_chunk_size)
+                             recurrent_chunk_size=recurrent_chunk_size,
+                             retention_rel_pos=retention_rel_pos)
 
         hidden_states = outputs[0]
         logits = self.score(hidden_states)
