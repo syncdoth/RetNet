@@ -56,6 +56,7 @@ class RMSNorm(nn.Module):
 
     def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
         super().__init__()
+        self.normalized_shape = dim
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if self.elementwise_affine:
@@ -77,6 +78,7 @@ class RetNetRelPos(nn.Module):
 
     def __init__(self, config: RetNetConfig):
         super().__init__()
+        self.config = config
         num_heads = config.decoder_retention_heads
 
         angle = 1.0 / (10000**torch.linspace(0, 1, config.decoder_embed_dim // num_heads // 2))
@@ -147,7 +149,7 @@ class RetNetRelPos(nn.Module):
             mask = mask.unsqueeze(0)  # [1, h, t, t]
             if retention_mask is not None:
                 # this is required for left padding
-                mask = mask * retention_mask.float().view(-1, 1, 1, slen)
+                mask = mask * retention_mask.float().view(-1, 1, 1, slen).to(mask)
 
             # scaling
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
@@ -193,6 +195,7 @@ class MultiScaleRetention(nn.Module):
         config: RetNetConfig,
         gate_fn="swish",
         use_bias=False,
+        tensor_parallel=False,
     ):
         super().__init__()
         self.config = config
@@ -215,6 +218,11 @@ class MultiScaleRetention(nn.Module):
         self.group_norm = RMSNorm(self.head_dim, eps=config.layernorm_eps, elementwise_affine=False)
         self.reset_parameters()
 
+        if tensor_parallel:
+            self.decay_proj = nn.Linear(self.num_heads, self.num_heads, bias=False)
+        else:
+            self.decay_proj = None
+
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.q_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.k_proj.weight, gain=2**-2.5)
@@ -230,6 +238,11 @@ class MultiScaleRetention(nn.Module):
         decay_mask,  # (1 or bsz) * num_head * len * len
         """
         decay_mask, intra_decay, scale = decay_mask
+        # just return retention_rel_pos projected
+        # TODO: for shardformer
+        if self.decay_proj is not None:
+            decay_mask = self.decay_proj(decay_mask.transpose(-1, -3)).transpose(-3, -1)
+
         # [b, h, t, t]
         retention = q @ k.transpose(-1, -2)  # (scaled dot-product)
         retention = retention * decay_mask
@@ -242,6 +255,9 @@ class MultiScaleRetention(nn.Module):
 
         if self.training:  # skip cache
             return output, None, retention
+
+        if self.decay_proj is not None:
+            intra_decay = self.decay_proj(intra_decay.transpose(-1, -2)).transpose(-2, -1)
 
         # kv cache: [b, h, t, v_dim, qk_dim]
         current_kv = k.unsqueeze(-2) * v.unsqueeze(-1)
@@ -261,7 +277,7 @@ class MultiScaleRetention(nn.Module):
         retention_mask # bsz * 1
         """
         if retention_mask is not None:
-            retention_mask = retention_mask.float().view(-1, 1, 1, 1)
+            retention_mask = retention_mask.float().view(-1, 1, 1, 1).to(decay)
         else:
             retention_mask = torch.ones(k.size(0), 1, 1, 1).to(decay)
         # (b, h, v_dim, qk_dim)
@@ -509,7 +525,7 @@ class DropPath(nn.Module):
 
 class RetNetDecoderLayer(nn.Module):
 
-    def __init__(self, config: RetNetConfig, depth: int):
+    def __init__(self, config: RetNetConfig, depth: int, tensor_parallel: bool = False):
         super().__init__()
         self.config = config
         self.embed_dim = config.decoder_embed_dim
@@ -521,7 +537,9 @@ class RetNetDecoderLayer(nn.Module):
         else:
             self.drop_path = None
 
-        self.retention = MultiScaleRetention(config, use_bias=False)
+        self.retention = MultiScaleRetention(config,
+                                             use_bias=False,
+                                             tensor_parallel=tensor_parallel)
 
         self.normalize_before = config.decoder_normalize_before
 
@@ -677,7 +695,10 @@ class RetNetOutputWithPast(ModelOutput):
 
 class RetNetModel(RetNetPreTrainedModel):
 
-    def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None):
+    def __init__(self,
+                 config: RetNetConfig,
+                 embed_tokens: nn.Embedding = None,
+                 tensor_parallel: bool = False):
         super().__init__(config)
         self.config = config
 
@@ -699,7 +720,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.layers = nn.ModuleList([])
 
         for i in range(config.decoder_layers):
-            self.layers.append(RetNetDecoderLayer(config, depth=i))
+            self.layers.append(RetNetDecoderLayer(config, depth=i, tensor_parallel=tensor_parallel))
 
         self.decoder_layers = len(self.layers)
 
@@ -769,6 +790,7 @@ class RetNetModel(RetNetPreTrainedModel):
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = 'parallel',
         recurrent_chunk_size: Optional[int] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[Tuple, RetNetOutputWithPast]:
 
         if output_retentions is None and output_attentions is not None:
@@ -814,11 +836,12 @@ class RetNetModel(RetNetPreTrainedModel):
         else:
             slen = seq_length
         # relative position
-        retention_rel_pos = self.retnet_rel_pos(slen,
-                                                forward_impl=forward_impl,
-                                                recurrent_chunk_size=recurrent_chunk_size,
-                                                retention_mask=retention_mask,
-                                                get_decay_scale=not self.training)
+        if retention_rel_pos is None:
+            retention_rel_pos = self.retnet_rel_pos(slen,
+                                                    forward_impl=forward_impl,
+                                                    recurrent_chunk_size=recurrent_chunk_size,
+                                                    retention_mask=retention_mask,
+                                                    get_decay_scale=not self.training)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -928,9 +951,12 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
 
 class RetNetForCausalLM(RetNetPreTrainedModel):
 
-    def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None) -> None:
+    def __init__(self,
+                 config: RetNetConfig,
+                 embed_tokens: nn.Embedding = None,
+                 tensor_parallel: bool = False) -> None:
         super().__init__(config)
-        self.model = RetNetModel(config, embed_tokens=embed_tokens)
+        self.model = RetNetModel(config, embed_tokens=embed_tokens, tensor_parallel=tensor_parallel)
         self.lm_head = nn.Linear(config.decoder_embed_dim, config.vocab_size, bias=False)
 
         self.post_init()
@@ -968,6 +994,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = None,
         recurrent_chunk_size: Optional[int] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[Tuple, RetNetCausalLMOutputWithPast]:
         if output_retentions is None and output_attentions is not None:
             output_retentions = output_attentions
@@ -990,7 +1017,8 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
                              return_dict=return_dict,
                              forward_impl=forward_impl,
                              use_cache=use_cache,
-                             recurrent_chunk_size=recurrent_chunk_size)
+                             recurrent_chunk_size=recurrent_chunk_size,
+                             retention_rel_pos=retention_rel_pos)
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
@@ -1151,10 +1179,10 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
 
 class RetNetForSequenceClassification(RetNetPreTrainedModel):
 
-    def __init__(self, config):
+    def __init__(self, config, tensor_parallel=False):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.model = RetNetModel(config)
+        self.model = RetNetModel(config, tensor_parallel=tensor_parallel)
         self.score = nn.Linear(config.decoder_embed_dim, self.num_labels, bias=False)
 
         # Initialize weights and apply final processing
@@ -1181,6 +1209,7 @@ class RetNetForSequenceClassification(RetNetPreTrainedModel):
         return_dict: Optional[bool] = None,
         forward_impl: Optional[str] = None,
         recurrent_chunk_size: Optional[int] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
 
         if output_retentions is None and output_attentions is not None:
@@ -1204,7 +1233,8 @@ class RetNetForSequenceClassification(RetNetPreTrainedModel):
                              return_dict=return_dict,
                              forward_impl=forward_impl,
                              use_cache=use_cache,
-                             recurrent_chunk_size=recurrent_chunk_size)
+                             recurrent_chunk_size=recurrent_chunk_size,
+                             retention_rel_pos=retention_rel_pos)
 
         hidden_states = outputs[0]
         logits = self.score(hidden_states)
