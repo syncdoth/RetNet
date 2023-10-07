@@ -964,6 +964,8 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
         super().__init__(config)
         self.model = RetNetModel(config, embed_tokens=embed_tokens, tensor_parallel=tensor_parallel)
         self.lm_head = nn.Linear(config.decoder_embed_dim, config.vocab_size, bias=False)
+        # init here
+        torch.nn.init.normal_(self.lm_head.weight, mean=0, std=config.decoder_embed_dim**-0.5)
 
         self.post_init()
 
