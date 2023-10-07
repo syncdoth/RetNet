@@ -97,7 +97,8 @@ class RetNetRelPos(nn.Module):
                 slen,
                 forward_impl='parallel',
                 recurrent_chunk_size=None,
-                retention_mask=None):
+                retention_mask=None,
+                get_decay_scale=True):
         if forward_impl == 'recurrent':
             sin = torch.sin(self.angle * (slen - 1))
             cos = torch.cos(self.angle * (slen - 1))
@@ -129,7 +130,7 @@ class RetNetRelPos(nn.Module):
             query_inner_decay = query_inner_decay[None, :, :, None] / (
                 scale / mask[:, :, -1].sum(dim=-1)[:, :, None, None])
             # decay_scale (used for kv cache)
-            if not self.training:
+            if get_decay_scale:
                 decay_scale = self.compute_decay_scale(slen, retention_mask)
             else:
                 decay_scale = None
@@ -152,7 +153,7 @@ class RetNetRelPos(nn.Module):
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
             mask = torch.nan_to_num(mask, nan=0.0)
             # decay_scale (used for kv cache)
-            if not self.training:
+            if get_decay_scale:
                 decay_scale = self.compute_decay_scale(slen, retention_mask)
             else:
                 decay_scale = None
@@ -816,7 +817,8 @@ class RetNetModel(RetNetPreTrainedModel):
         retention_rel_pos = self.retnet_rel_pos(slen,
                                                 forward_impl=forward_impl,
                                                 recurrent_chunk_size=recurrent_chunk_size,
-                                                retention_mask=retention_mask)
+                                                retention_mask=retention_mask,
+                                                get_decay_scale=not self.training)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
