@@ -195,6 +195,7 @@ class MultiScaleRetention(nn.Module):
         config: RetNetConfig,
         gate_fn="swish",
         use_bias=False,
+        tensor_parallel=False,
     ):
         super().__init__()
         self.config = config
@@ -217,7 +218,10 @@ class MultiScaleRetention(nn.Module):
         self.group_norm = RMSNorm(self.head_dim, eps=config.layernorm_eps, elementwise_affine=False)
         self.reset_parameters()
 
-        self.decay_proj = nn.Linear(self.num_heads, self.num_heads, bias=False)
+        if tensor_parallel:
+            self.decay_proj = nn.Linear(self.num_heads, self.num_heads, bias=False)
+        else:
+            self.decay_proj = None
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.q_proj.weight, gain=2**-2.5)
@@ -236,8 +240,8 @@ class MultiScaleRetention(nn.Module):
         decay_mask, intra_decay, scale = decay_mask
         # just return retention_rel_pos projected
         # TODO: for shardformer
-        decay_mask = self.decay_proj(decay_mask.transpose(-1, -3)).transpose(-3, -1)
-        intra_decay = self.decay_proj(intra_decay.transpose(-1, -2)).transpose(-2, -1)
+        if self.decay_proj is not None:
+            decay_mask = self.decay_proj(decay_mask.transpose(-1, -3)).transpose(-3, -1)
 
         # [b, h, t, t]
         retention = q @ k.transpose(-1, -2)  # (scaled dot-product)
@@ -251,6 +255,9 @@ class MultiScaleRetention(nn.Module):
 
         if self.training:  # skip cache
             return output, None, retention
+
+        if self.decay_proj is not None:
+            intra_decay = self.decay_proj(intra_decay.transpose(-1, -2)).transpose(-2, -1)
 
         # kv cache: [b, h, t, v_dim, qk_dim]
         current_kv = k.unsqueeze(-2) * v.unsqueeze(-1)
@@ -518,7 +525,7 @@ class DropPath(nn.Module):
 
 class RetNetDecoderLayer(nn.Module):
 
-    def __init__(self, config: RetNetConfig, depth: int):
+    def __init__(self, config: RetNetConfig, depth: int, tensor_parallel: bool = False):
         super().__init__()
         self.config = config
         self.embed_dim = config.decoder_embed_dim
@@ -530,7 +537,9 @@ class RetNetDecoderLayer(nn.Module):
         else:
             self.drop_path = None
 
-        self.retention = MultiScaleRetention(config, use_bias=False)
+        self.retention = MultiScaleRetention(config,
+                                             use_bias=False,
+                                             tensor_parallel=tensor_parallel)
 
         self.normalize_before = config.decoder_normalize_before
 
@@ -686,7 +695,10 @@ class RetNetOutputWithPast(ModelOutput):
 
 class RetNetModel(RetNetPreTrainedModel):
 
-    def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None):
+    def __init__(self,
+                 config: RetNetConfig,
+                 embed_tokens: nn.Embedding = None,
+                 tensor_parallel: bool = False):
         super().__init__(config)
         self.config = config
 
@@ -708,7 +720,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.layers = nn.ModuleList([])
 
         for i in range(config.decoder_layers):
-            self.layers.append(RetNetDecoderLayer(config, depth=i))
+            self.layers.append(RetNetDecoderLayer(config, depth=i, tensor_parallel=tensor_parallel))
 
         self.decoder_layers = len(self.layers)
 
@@ -939,9 +951,12 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
 
 class RetNetForCausalLM(RetNetPreTrainedModel):
 
-    def __init__(self, config: RetNetConfig, embed_tokens: nn.Embedding = None) -> None:
+    def __init__(self,
+                 config: RetNetConfig,
+                 embed_tokens: nn.Embedding = None,
+                 tensor_parallel: bool = False) -> None:
         super().__init__(config)
-        self.model = RetNetModel(config, embed_tokens=embed_tokens)
+        self.model = RetNetModel(config, embed_tokens=embed_tokens, tensor_parallel=tensor_parallel)
         self.lm_head = nn.Linear(config.decoder_embed_dim, config.vocab_size, bias=False)
 
         self.post_init()
@@ -1164,10 +1179,10 @@ class RetNetForCausalLM(RetNetPreTrainedModel):
 
 class RetNetForSequenceClassification(RetNetPreTrainedModel):
 
-    def __init__(self, config):
+    def __init__(self, config, tensor_parallel=False):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.model = RetNetModel(config)
+        self.model = RetNetModel(config, tensor_parallel=tensor_parallel)
         self.score = nn.Linear(config.decoder_embed_dim, self.num_labels, bias=False)
 
         # Initialize weights and apply final processing
