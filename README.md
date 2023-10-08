@@ -2,18 +2,21 @@
 
 A huggingface transformer compatible implementation of Retention Networks. ([https://arxiv.org/pdf/2307.08621.pdf](https://arxiv.org/pdf/2307.08621.pdf)) The implementation is on par with the official implementation at [torchscale](https://github.com/microsoft/torchscale) repo.
 
-Supports two types of implementations: `parallel`, `recurrent`.
-
-- My version (main branch) supports `chunkwise` forward.
+Supports three types of implementations: `parallel`, `recurrent`, `chunkwise`.
 
 Check `play.ipynb` for minimal testing of parallel, recurrent, and chunkwise forward.
 
+- The `chunkwise` produces slightly different result than `parallel` and `recurrent` for now.
+
 ## Getting Started
 
-Using `PyTorch` and huggingface `transformers`.
+Using `PyTorch` and huggingface `transformers`. Also, we need `timm` for `droppath` in torchscale.
 
 ```bash
-pip install torch transformers
+pip install torch transformers timm
+# pip install apex (optional)
+# pip install pytest (to run tests/)
+# pip install fire (to run convert_weights.py)
 ```
 
 You may want to use `conda`.
@@ -29,6 +32,7 @@ from retnet.configuration_retnet import RetNetConfig
 
 config = RetNetConfig(decoder_layers=8,
                       decoder_embed_dim=512,
+                      decoder_value_embed_dim=1024,
                       decoder_retention_heads=4,
                       decoder_ffn_embed_dim=1024)
 model = RetNetModel(config)
@@ -74,7 +78,10 @@ tokenizer.pad_token = tokenizer.eos_token
 inputs = tokenizer("Retention refers to", return_tensors='pt')
 
 # parallel forward
-generated = model.generate(**inputs, parallel_compute_prompt=True, max_new_tokens=20)
+# our custom generate function
+generated = model.custom_generate(**inputs, parallel_compute_prompt=True, max_new_tokens=20)
+# huggingface's generate. Both should be equivalent
+generated = model.generate(**inputs, max_new_tokens=20)
 tokenizer.batch_decode(generated)
 # NOTE: this should be gibberish, since the model is not trained.
 ```
@@ -85,8 +92,9 @@ tokenizer.batch_decode(generated)
 
 ## Huggingface Integration
 
-It currently uses a custom version of `past_key_values`, which hinders it being used with
-`generateMixIn`. Other than that, almost all of huggingface interfaces should work together.
+Now the model supports full huggingface integration (except for things I don't realize :)).
+It can be trained with huggingface Trainer, can be saved and loaded with `save_pretrained` or 
+`from_pretrained`, generate with `.generate`.
 
 ### Minimal Training Example
 
@@ -111,7 +119,7 @@ python train.py \
     --per_device_eval_batch_size 16
 
 ```
-## Some Old Notes
+## Some Useful Notes
 
 ## xpos note
 
@@ -143,10 +151,7 @@ further fed into recurrent or chunkwise retention in the next token steps.
 
 ## Configs
 
-The `configs/` folder includes example configurations listed in the paper for
+The `configs/` folder includes example configurations ~listed in the paper~ **found in torchscale repo** for
 different sizes. For simplicity, I used GPT2 tokenizer, and hence the model
-has 50217 as vocab size for default (this can change when microsoft release the official
+has 50257 as vocab size for default (this can change when microsoft release the official
 weight).
-
-- Technically, I used `EleutherAI/gpt-j-6b` tokenizer, which is identical except for
-  a few extra tokens.
