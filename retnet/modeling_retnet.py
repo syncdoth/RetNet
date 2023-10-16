@@ -14,10 +14,22 @@ from transformers.modeling_outputs import ModelOutput, SequenceClassifierOutputW
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
+SUPPORT_XFORMERS = False
+SUPPORT_APEX = False
+
 try:
-    from apex.normalization import FusedLayerNorm as LayerNorm
+    import xformers.triton as xtriton
+    import xformers.ops as xops
+    SUPPORT_XFORMERS = True
+except ImportError:
+    pass
+
+try:
+    from apex.normalization import FusedLayerNorm
+    from apex.normalization import FusedRMSNorm
+    SUPPORT_APEX = True
 except ModuleNotFoundError:
-    from torch.nn import LayerNorm
+    pass
 
 from .configuration_retnet import RetNetConfig
 
@@ -50,6 +62,31 @@ def get_activation_fn(activation):
         return F.silu
     else:
         raise NotImplementedError
+
+
+def build_layernorm(dim, eps=1e-6, elementwise_affine=True, use_rms_norm=True):
+    use_xformer_norm = SUPPORT_XFORMERS
+    if use_rms_norm and SUPPORT_XFORMERS:
+        logger.warning_once("xformers.ops.RMSNorm does not support training."
+                            " Using apex.normalization.FusedRMSNorm instead.")
+        use_xformer_norm = False
+
+    if use_rms_norm:
+        if SUPPORT_XFORMERS and use_xformer_norm:  # TODO: no training support
+            return xops.RMSNorm(dim, eps=eps, include_weight=elementwise_affine)
+        if SUPPORT_APEX:
+            # TODO: check memory_efficient option of apex.normalization.FusedRMSNorm
+            return FusedRMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
+        else:  # use torchscale-adapted RMSNorm implementaiton
+            return RMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
+
+    # use layernorm (either from xformers.triton, apex or torch)
+    if SUPPORT_XFORMERS:  # TODO: backend error
+        return xtriton.FusedLayerNorm(dim, eps=eps, affine=elementwise_affine)
+    elif SUPPORT_APEX:
+        return FusedLayerNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
+    else:
+        return nn.LayerNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
 
 
 class RMSNorm(nn.Module):
@@ -215,7 +252,9 @@ class MultiScaleRetention(nn.Module):
 
         self.out_proj = nn.Linear(self.value_dim, self.embed_dim, bias=use_bias)
 
-        self.group_norm = RMSNorm(self.head_dim, eps=config.layernorm_eps, elementwise_affine=False)
+        self.group_norm = build_layernorm(self.head_dim,
+                                          eps=config.layernorm_eps,
+                                          elementwise_affine=False)
         self.reset_parameters()
 
         if tensor_parallel:
@@ -445,10 +484,9 @@ class FeedForwardNetwork(nn.Module):
         self.fc1 = nn.Linear(self.embed_dim, ffn_dim)
         self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
         if subln:
-            if use_rms_norm:
-                self.ffn_layernorm = RMSNorm(self.embed_dim, eps=layernorm_eps)
-            else:
-                self.ffn_layernorm = LayerNorm(self.embed_dim, eps=layernorm_eps)
+            self.ffn_layernorm = build_layernorm(ffn_dim,
+                                                 eps=layernorm_eps,
+                                                 use_rms_norm=use_rms_norm)
         else:
             self.ffn_layernorm = None
 
@@ -543,13 +581,13 @@ class RetNetDecoderLayer(nn.Module):
 
         self.normalize_before = config.decoder_normalize_before
 
-        self.retention_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.retention_layer_norm = build_layernorm(self.embed_dim, eps=config.layernorm_eps)
 
         self.ffn_dim = config.decoder_ffn_embed_dim
 
         self.ffn = self.build_ffn()
 
-        self.final_layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
+        self.final_layer_norm = build_layernorm(self.embed_dim, eps=config.layernorm_eps)
 
         if config.deepnorm:
             self.alpha = math.pow(2.0 * config.decoder_layers, 0.25)
@@ -558,6 +596,13 @@ class RetNetDecoderLayer(nn.Module):
 
     def build_ffn(self):
         if self.config.use_glu:
+            # TODO: error with gradient checkpointing
+            # if SUPPORT_XFORMERS:
+            #     return xops.SwiGLU(
+            #         self.embed_dim,
+            #         self.ffn_dim,
+            #         bias=False,
+            #     )
             return GLU(
                 self.embed_dim,
                 self.ffn_dim,
@@ -719,7 +764,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.embed_tokens = embed_tokens
 
         if config.layernorm_embedding:
-            self.layernorm_embedding = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layernorm_embedding = build_layernorm(self.embed_dim, eps=config.layernorm_eps)
         else:
             self.layernorm_embedding = None
 
@@ -731,7 +776,7 @@ class RetNetModel(RetNetPreTrainedModel):
         self.decoder_layers = len(self.layers)
 
         if config.decoder_normalize_before:
-            self.layer_norm = RMSNorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layer_norm = build_layernorm(self.embed_dim, eps=config.layernorm_eps)
         else:
             self.layer_norm = None
 

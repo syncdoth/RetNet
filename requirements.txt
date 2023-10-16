@@ -5,3 +5,4 @@ apex  # better install it from source: https://github.com/NVIDIA/apex
 timm
 pytest
 fire
+xformers
