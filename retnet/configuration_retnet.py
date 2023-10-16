@@ -36,7 +36,7 @@ class RetNetConfig(PretrainedConfig):
     use_ffn_rms_norm: bool = False
     layernorm_eps: float = 1e-6
     tie_word_embeddings: bool = False
-
+    
     def __init__(
             self,
             vocab_size: int = 50257,
@@ -60,7 +60,7 @@ class RetNetConfig(PretrainedConfig):
             layernorm_embedding: bool = False,  # add layernorm to embedding
             no_scale_embedding: bool = True,  # if True, dont scale embeddings
             recurrent_chunk_size: int = 512,
-            use_glu: bool = True,  # use GLU instead of FFN
+            use_glu: bool = False,  # use GLU instead of FFN
             z_loss_coeff: float = 0.0,  # coefficient for z loss: TODO: 1e-4
             use_lm_decay: bool = False,
             deepnorm: bool = False,
@@ -68,6 +68,7 @@ class RetNetConfig(PretrainedConfig):
             use_ffn_rms_norm: bool = False,  # use RMSNorm instead of LayerNorm in FFN
             layernorm_eps: float = 1e-6,
             tie_word_embeddings: bool = False,
+            use_flash_retention: bool = False,
             **kwargs):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
@@ -96,7 +97,7 @@ class RetNetConfig(PretrainedConfig):
         # Blockwise
         self.recurrent_chunk_size = recurrent_chunk_size
         self.forward_impl = forward_impl
-
+        self.use_flash_retention = use_flash_retention
         if self.deepnorm:
             self.decoder_normalize_before = False
             self.subln = False
