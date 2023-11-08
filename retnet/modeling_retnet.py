@@ -132,7 +132,7 @@ class RetNetRelPos(nn.Module):
             decay = torch.log(1 - torch.exp(torch.linspace(s, e, num_heads)))  # [h,]
         else:
             decay = torch.log(
-                1 - 2 ** (-5 - torch.arange(num_heads, dtype=torch.float))
+                1 - 2 ** (-5 - torch.arange(num_heads, dtype=angle.dtype))
             )
         self.register_buffer("angle", angle)
         self.register_buffer("decay", decay)
@@ -234,7 +234,7 @@ class RetNetRelPos(nn.Module):
         return retention_rel_pos
 
     def compute_decay_scale(self, slen, retention_mask=None):
-        exponent = torch.arange(slen, device=self.decay.device).float()
+        exponent = torch.arange(slen, device=self.decay.device, dtype=self.decay.dtype)
         decay_scale = self.decay.exp().view(-1, 1) ** exponent.view(1, -1)  # [h, t]
         if retention_mask is not None:
             seqlen = retention_mask.sum(dim=-1)  # [b,]
@@ -391,7 +391,6 @@ class MultiScaleRetention(nn.Module):
         cross_decay,  # 1 * num_head * 1 * 1
         inner_decay,  # 1 * num_head * chunk_size * 1
         """
-        # TODO: not working properly
         (
             decay_mask,
             cross_decay,
