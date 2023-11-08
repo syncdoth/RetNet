@@ -104,6 +104,10 @@ class RMSNorm(nn.Module):
         else:
             self.register_parameter("weight", None)
 
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
@@ -742,17 +746,19 @@ class RetNetPreTrainedModel(PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [r"decoder\.version"]
 
     def _init_weights(self, module):
-        """
-        Following original retnet, weights are already initialized in their own
-        ways within their own init.
-        """
-        pass
-        # below is copied from LlamaPretrainedModel
-        # std = self.config.initializer_range
-        # if isinstance(module, nn.Linear):
-        #     module.weight.data.normal_(mean=0.0, std=std)
-        #     if module.bias is not None:
-        #         module.bias.data.zero_()
+        """Initialize the weights"""
+        layernorm_classes = (nn.LayerNorm, RMSNorm)
+        if SUPPORT_APEX:
+            layernorm_classes += (FusedLayerNorm, FusedRMSNorm)
+        if SUPPORT_XFORMERS:
+            layernorm_classes += (xops.RMSNorm,)
+
+        reset_modules = (MultiScaleRetention, GLU, FeedForwardNetwork)
+        reset_modules += layernorm_classes
+
+        if isinstance(module, reset_modules):
+            module.reset_parameters()
+        # copied from LlamaPretrainedModel
         # elif isinstance(module, nn.Embedding):
         #     module.weight.data.normal_(mean=0.0, std=std)
         #     if module.padding_idx is not None:
