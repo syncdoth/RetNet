@@ -508,7 +508,10 @@ class MultiScaleRetention(nn.Module):
             raise ValueError(f"forward_impl {forward_impl} not supported.")
 
         # concaat heads
-        normed = self.group_norm(retention_out).reshape(B, T, self.value_dim)
+        dtype = retention_out.dtype
+        # when elementwise_affine=False, apex.normalization.FusedRMSNorm may autocast to
+        # fp32. We want it back to original dtype.
+        normed = self.group_norm(retention_out).reshape(B, T, self.value_dim).type_as(dtype)
         # out gate & proj
         out = self.gate_fn(g) * normed
         out = self.out_proj(out)
