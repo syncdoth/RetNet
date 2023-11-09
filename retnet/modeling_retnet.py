@@ -69,20 +69,9 @@ def get_activation_fn(activation):
 def build_layernorm(
     dim, eps=1e-6, elementwise_affine=True, use_rms_norm=True, disable_fused_ops=False
 ):
-    use_xformer_norm = SUPPORT_XFORMERS
-    if use_rms_norm and SUPPORT_XFORMERS:
-        logger.warning_once(
-            "xformers.ops.RMSNorm does not support training."
-            " Using apex.normalization.FusedRMSNorm instead."
-        )
-        use_xformer_norm = False
-
     if use_rms_norm:
         if disable_fused_ops:
             return RMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
-
-        if SUPPORT_XFORMERS and use_xformer_norm:  # TODO: no training support
-            return xops.RMSNorm(dim, eps=eps, include_weight=elementwise_affine)
         if SUPPORT_APEX:
             # TODO: check memory_efficient option of apex.normalization.FusedRMSNorm
             return FusedRMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
@@ -92,9 +81,6 @@ def build_layernorm(
     # use layernorm (either from xformers.triton, apex or torch)
     if disable_fused_ops:
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
-
-    if SUPPORT_XFORMERS:  # TODO: backend error
-        return xtriton.FusedLayerNorm(dim, eps=eps, affine=elementwise_affine)
     elif SUPPORT_APEX:
         return FusedLayerNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
     else:
@@ -522,7 +508,7 @@ class MultiScaleRetention(nn.Module):
         dtype = retention_out.dtype
         # when elementwise_affine=False, apex.normalization.FusedRMSNorm may autocast to
         # fp32. We want it back to original dtype.
-        normed = self.group_norm(retention_out).reshape(B, T, self.value_dim).to(dtype)
+        normed = self.group_norm(retention_out.contiguous()).reshape(B, T, self.value_dim).to(dtype)
         # out gate & proj
         out = self.gate_fn(g) * normed
         out = self.out_proj(out)
@@ -594,6 +580,7 @@ class GLU(nn.Module):
     ):
         super().__init__()
         self.embed_dim = embed_dim
+        self.ffn_dim = ffn_dim
         self.activation_fn = get_activation_fn(activation=str(activation_fn))
         self.activation_dropout_module = torch.nn.Dropout(activation_dropout)
         self.dropout_module = torch.nn.Dropout(dropout)
@@ -677,13 +664,6 @@ class RetNetDecoderLayer(nn.Module):
 
     def build_ffn(self):
         if self.config.use_glu:
-            # TODO: error with gradient checkpointing
-            # if SUPPORT_XFORMERS:
-            #     return xops.SwiGLU(
-            #         self.embed_dim,
-            #         self.ffn_dim,
-            #         bias=False,
-            #     )
             return GLU(
                 self.embed_dim,
                 self.ffn_dim,
@@ -787,29 +767,158 @@ class RetNetPreTrainedModel(PreTrainedModel):
         #     if module.padding_idx is not None:
         #         module.weight.data[module.padding_idx].zero_()
 
+    def replace_fused_modules(self) -> None:
+        if not SUPPORT_APEX or not SUPPORT_XFORMERS:
+            return
+
+        module_descriptions = {
+            "RetNetModel": ["layer_norm", "layernorm_embedding"],
+            "RetNetDecoderLayer": ["retention_layer_norm", "final_layer_norm"],
+            "MultiScaleRetention": ["group_norm"],
+            "FeedForwardNetwork": ["ffn_layernorm"],
+        }
+
+        if SUPPORT_XFORMERS and self.config.use_glu:
+            module_descriptions["RetNetDecoderLayer"].append("ffn")
+
+        for layer_cls, sub_module_replacement in module_descriptions.items():
+            self._recursive_replace_layer(
+                self,
+                layer_cls,
+                sub_module_replacement,
+            )
+
+        # freeze model
+        logger.info(
+            "replace_fused_modules must be called at inference time only,"
+            " because some of the operations may not support gradients."
+            " Freezing the model and setting to eval mode."
+        )
+        self.eval()
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def _recursive_replace_layer(
+        self,
+        module: nn.Module,
+        origin_cls: Union[str, nn.Module],
+        sub_module_replacement: list,
+    ) -> None:
+        r"""
+        Reverse the replace layer operation
+
+        Args:
+            module (torch.nn.Module): The object of layer to shard
+            origin_cls (Union[str, torch.nn.Module]): The origin layer class or a string of layer class name
+            sub_module_replacement ((List[SubModuleReplacementDescription]): The function list to get sub module shard information in policy
+        """
+        if (
+            isinstance(origin_cls, str) and origin_cls == module.__class__.__name__
+        ) or (module.__class__ == origin_cls):
+            self._replace_sub_module(module, sub_module_replacement)
+
+        for name, child in module.named_children():
+            self._recursive_replace_layer(
+                child,
+                origin_cls,
+                sub_module_replacement,
+            )
+
+    def _replace_sub_module(
+        self,
+        org_layer: nn.Module,
+        sub_module_replacement: list,
+    ) -> None:
+        r"""
+        Shard one layer according to the policy, the layer should be the same class as the key in policy's argument_policy return dict
+
+        Args:
+            org_layer (torch.nn.Module): The origin layer object to shard
+            sub_module_replacement (List[SubModuleReplacementDescription]): The sub module replacement description list
+        """
+        for suffix in sub_module_replacement:
+            native_sub_module = getattr(org_layer, suffix)
+
+            # Skip replacement
+            if native_sub_module is None:
+                continue
+
+            if isinstance(native_sub_module, RMSNorm):
+                if SUPPORT_XFORMERS:
+                    replace_layer = xops.RMSNorm(
+                        native_sub_module.normalized_shape,
+                        eps=native_sub_module.eps,
+                        include_weight=native_sub_module.elementwise_affine,
+                    )
+                elif SUPPORT_APEX:
+                    replace_layer = FusedRMSNorm(
+                        native_sub_module.normalized_shape,
+                        eps=native_sub_module.eps,
+                        elementwise_affine=native_sub_module.elementwise_affine,
+                    )
+                replace_layer.weight = native_sub_module.weight
+            elif isinstance(native_sub_module, nn.LayerNorm):
+                if SUPPORT_XFORMERS:
+                    replace_layer = xtriton.FusedLayerNorm(
+                        native_sub_module.normalized_shape,
+                        eps=native_sub_module.eps,
+                        affine=native_sub_module.elementwise_affine,
+                    )
+                elif SUPPORT_APEX:
+                    replace_layer = FusedLayerNorm(
+                        native_sub_module.normalized_shape,
+                        eps=native_sub_module.eps,
+                        elementwise_affine=native_sub_module.elementwise_affine,
+                    )
+                replace_layer.weight = native_sub_module.weight
+                replace_layer.bias = native_sub_module.bias
+            elif isinstance(native_sub_module, GLU):
+                # replace GLU -> xops.SwiGLU
+                replace_layer = xops.SwiGLU(
+                    native_sub_module.embed_dim,
+                    native_sub_module.ffn_dim,
+                    bias=False,
+                )
+                replace_layer.w12.weight = nn.Parameter(
+                    torch.cat(
+                        [native_sub_module.fc1.weight, native_sub_module.gate.weight],
+                        dim=0,
+                    ),
+                    requires_grad=False,
+                )
+                replace_layer.w3.weight = native_sub_module.fc2.weight
+
+            setattr(org_layer, suffix, replace_layer)
+
 
 @dataclass
 class RetNetOutputWithPast(ModelOutput):
     """
     class for RetNet model's outputs that may also contain a past key/values (to speed up sequential decoding).
+
     config:
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, decoder_embed_dim)`):
             Sequence of hidden-states at the output of the last layer of the model.
+
             If `past_key_values` is used only the last hidden-state of the sequences of shape `(batch_size, 1,
             decoder_embed_dim)` is output.
         past_key_values (`List(Dict(str, torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
             - "prev_key_value": shape=(bsz * num_head * v_dim * qk_dim)
             - "scale": shape=((1 or bsz) * num_head * 1 * 1)
+
             Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
             that can be used (see `past_key_values` input) to speed up sequential decoding.
         hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
             Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
             one for the output of each layer) of shape `(batch_size, sequence_length, decoder_embed_dim)`.
+
             Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
         retentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_retentions=True` is passed or when `config.output_retentions=True`):
             Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
             sequence_length)`.
+
             Retentions weights, used for visualization.
+
         attentions (`tuple(torch.FloatTensor)`, *optional*, for backward compatibility. Same as retentions.
     """
 
@@ -1086,6 +1195,7 @@ class RetNetModel(RetNetPreTrainedModel):
 class RetNetCausalLMOutputWithPast(ModelOutput):
     """
     class for RetNet causal language model (or autoregressive) outputs.
+
     config:
         loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
             Language modeling loss (for next-token prediction).
@@ -1094,16 +1204,20 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
         past_key_values (`List(Dict(str, torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
             - "prev_key_value": shape=(bsz * num_head * v_dim * qk_dim)
             - "scale": shape=((1 or bsz) * num_head * 1 * 1)
+
             Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
             that can be used (see `past_key_values` input) to speed up sequential decoding.
         hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
             Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
             one for the output of each layer) of shape `(batch_size, sequence_length, decoder_embed_dim)`.
+
             Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
         retentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_retentions=True` is passed or when `config.output_retentions=True`):
             Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
             sequence_length)`.
+
             Retentions weights, used for visualization.
+
         attentions (`tuple(torch.FloatTensor)`, *optional*, for backward compatibility. Same as retentions.
     """
 
