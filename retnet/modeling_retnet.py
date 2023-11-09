@@ -66,7 +66,9 @@ def get_activation_fn(activation):
         raise NotImplementedError
 
 
-def build_layernorm(dim, eps=1e-6, elementwise_affine=True, use_rms_norm=True):
+def build_layernorm(
+    dim, eps=1e-6, elementwise_affine=True, use_rms_norm=True, disable_fused_ops=False
+):
     use_xformer_norm = SUPPORT_XFORMERS
     if use_rms_norm and SUPPORT_XFORMERS:
         logger.warning_once(
@@ -76,6 +78,9 @@ def build_layernorm(dim, eps=1e-6, elementwise_affine=True, use_rms_norm=True):
         use_xformer_norm = False
 
     if use_rms_norm:
+        if disable_fused_ops:
+            return RMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
+
         if SUPPORT_XFORMERS and use_xformer_norm:  # TODO: no training support
             return xops.RMSNorm(dim, eps=eps, include_weight=elementwise_affine)
         if SUPPORT_APEX:
@@ -85,6 +90,9 @@ def build_layernorm(dim, eps=1e-6, elementwise_affine=True, use_rms_norm=True):
             return RMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
 
     # use layernorm (either from xformers.triton, apex or torch)
+    if disable_fused_ops:
+        return nn.LayerNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
+
     if SUPPORT_XFORMERS:  # TODO: backend error
         return xtriton.FusedLayerNorm(dim, eps=eps, affine=elementwise_affine)
     elif SUPPORT_APEX:
@@ -282,7 +290,10 @@ class MultiScaleRetention(nn.Module):
         self.out_proj = nn.Linear(self.value_dim, self.embed_dim, bias=use_bias)
 
         self.group_norm = build_layernorm(
-            self.head_dim, eps=config.layernorm_eps, elementwise_affine=False
+            self.head_dim,
+            eps=config.layernorm_eps,
+            elementwise_affine=False,
+            disable_fused_ops=config.disable_fused_ops,
         )
         self.reset_parameters()
 
@@ -533,6 +544,7 @@ class FeedForwardNetwork(nn.Module):
         layernorm_eps,
         subln=False,
         use_rms_norm=False,
+        disable_fused_ops=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -543,7 +555,10 @@ class FeedForwardNetwork(nn.Module):
         self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
         if subln:
             self.ffn_layernorm = build_layernorm(
-                ffn_dim, eps=layernorm_eps, use_rms_norm=use_rms_norm
+                ffn_dim,
+                eps=layernorm_eps,
+                use_rms_norm=use_rms_norm,
+                disable_fused_ops=disable_fused_ops,
             )
         else:
             self.ffn_layernorm = None
@@ -640,7 +655,9 @@ class RetNetDecoderLayer(nn.Module):
         self.normalize_before = config.decoder_normalize_before
 
         self.retention_layer_norm = build_layernorm(
-            self.embed_dim, eps=config.layernorm_eps
+            self.embed_dim,
+            eps=config.layernorm_eps,
+            disable_fused_ops=config.disable_fused_ops,
         )
 
         self.ffn_dim = config.decoder_ffn_embed_dim
@@ -648,7 +665,9 @@ class RetNetDecoderLayer(nn.Module):
         self.ffn = self.build_ffn()
 
         self.final_layer_norm = build_layernorm(
-            self.embed_dim, eps=config.layernorm_eps
+            self.embed_dim,
+            eps=config.layernorm_eps,
+            disable_fused_ops=config.disable_fused_ops,
         )
 
         if config.deepnorm:
@@ -682,6 +701,7 @@ class RetNetDecoderLayer(nn.Module):
                 self.config.layernorm_eps,
                 self.config.subln,
                 self.config.use_ffn_rms_norm,
+                self.config.disable_fused_ops,
             )
 
     def residual_connection(self, x, residual):
@@ -772,30 +792,24 @@ class RetNetPreTrainedModel(PreTrainedModel):
 class RetNetOutputWithPast(ModelOutput):
     """
     class for RetNet model's outputs that may also contain a past key/values (to speed up sequential decoding).
-
     config:
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, decoder_embed_dim)`):
             Sequence of hidden-states at the output of the last layer of the model.
-
             If `past_key_values` is used only the last hidden-state of the sequences of shape `(batch_size, 1,
             decoder_embed_dim)` is output.
         past_key_values (`List(Dict(str, torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
             - "prev_key_value": shape=(bsz * num_head * v_dim * qk_dim)
             - "scale": shape=((1 or bsz) * num_head * 1 * 1)
-
             Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
             that can be used (see `past_key_values` input) to speed up sequential decoding.
         hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
             Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
             one for the output of each layer) of shape `(batch_size, sequence_length, decoder_embed_dim)`.
-
             Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
         retentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_retentions=True` is passed or when `config.output_retentions=True`):
             Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
             sequence_length)`.
-
             Retentions weights, used for visualization.
-
         attentions (`tuple(torch.FloatTensor)`, *optional*, for backward compatibility. Same as retentions.
     """
 
@@ -831,7 +845,9 @@ class RetNetModel(RetNetPreTrainedModel):
 
         if config.layernorm_embedding:
             self.layernorm_embedding = build_layernorm(
-                self.embed_dim, eps=config.layernorm_eps
+                self.embed_dim,
+                eps=config.layernorm_eps,
+                disable_fused_ops=config.disable_fused_ops,
             )
         else:
             self.layernorm_embedding = None
@@ -846,7 +862,11 @@ class RetNetModel(RetNetPreTrainedModel):
         self.decoder_layers = len(self.layers)
 
         if config.decoder_normalize_before:
-            self.layer_norm = build_layernorm(self.embed_dim, eps=config.layernorm_eps)
+            self.layer_norm = build_layernorm(
+                self.embed_dim,
+                eps=config.layernorm_eps,
+                disable_fused_ops=config.disable_fused_ops,
+            )
         else:
             self.layer_norm = None
 
@@ -1066,7 +1086,6 @@ class RetNetModel(RetNetPreTrainedModel):
 class RetNetCausalLMOutputWithPast(ModelOutput):
     """
     class for RetNet causal language model (or autoregressive) outputs.
-
     config:
         loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
             Language modeling loss (for next-token prediction).
@@ -1075,20 +1094,16 @@ class RetNetCausalLMOutputWithPast(ModelOutput):
         past_key_values (`List(Dict(str, torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
             - "prev_key_value": shape=(bsz * num_head * v_dim * qk_dim)
             - "scale": shape=((1 or bsz) * num_head * 1 * 1)
-
             Contains pre-computed hidden-states (key and values in the multi-scale retention blocks)
             that can be used (see `past_key_values` input) to speed up sequential decoding.
         hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
             Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
             one for the output of each layer) of shape `(batch_size, sequence_length, decoder_embed_dim)`.
-
             Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
         retentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_retentions=True` is passed or when `config.output_retentions=True`):
             Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
             sequence_length)`.
-
             Retentions weights, used for visualization.
-
         attentions (`tuple(torch.FloatTensor)`, *optional*, for backward compatibility. Same as retentions.
     """
 

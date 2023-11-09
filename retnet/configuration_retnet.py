@@ -36,6 +36,7 @@ class RetNetConfig(PretrainedConfig):
     use_ffn_rms_norm: bool = False
     layernorm_eps: float = 1e-6
     tie_word_embeddings: bool = False
+    disable_fused_ops: bool = False
 
     def __init__(
             self,
@@ -66,6 +67,7 @@ class RetNetConfig(PretrainedConfig):
             deepnorm: bool = False,
             subln: bool = True,
             use_ffn_rms_norm: bool = False,  # use RMSNorm instead of LayerNorm in FFN
+            disable_fused_ops: bool = False,
             layernorm_eps: float = 1e-6,
             tie_word_embeddings: bool = False,
             **kwargs):
@@ -92,6 +94,7 @@ class RetNetConfig(PretrainedConfig):
         self.deepnorm = deepnorm
         self.subln = subln
         self.use_ffn_rms_norm = use_ffn_rms_norm
+        self.disable_fused_ops = disable_fused_ops
         self.layernorm_eps = layernorm_eps
         # Blockwise
         self.recurrent_chunk_size = recurrent_chunk_size

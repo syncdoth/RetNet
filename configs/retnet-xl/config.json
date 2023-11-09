@@ -23,6 +23,8 @@
   "recurrent_chunk_size": 512,
   "subln": true,
   "tie_word_embeddings": false,
+  "disable_fused_ops": true,
+  "torch_dtype": "bfloat16",
   "transformers_version": "4.29.1",
   "use_cache": true,
   "use_ffn_rms_norm": false,

@@ -25,6 +25,8 @@
   "forward_impl": "parallel",
   "tie_word_embeddings": false,
   "is_decoder": true,
+  "disable_fused_ops": true,
+  "torch_dtype": "bfloat16",
   "transformers_version": "4.29.1",
   "use_cache": true,
   "model_type": "retnet"
