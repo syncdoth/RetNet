@@ -1,3 +1,4 @@
+#yapf: disable
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
@@ -295,7 +296,7 @@ class MultiScaleRetention(nn.Module):
         nn.init.xavier_uniform_(self.g_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.out_proj.weight)
 
-    def parallel_retention(self, q, k, v, decay_mask):
+    def parallel_retention(self, q, k, v, decay_mask, use_cache=False):
         """
         q,  # bsz * num_head * len * qk_dim
         k,  # bsz * num_head * len * qk_dim
@@ -320,7 +321,7 @@ class MultiScaleRetention(nn.Module):
         output = retention @ v  # [b, h, t, v_dim / h]
         output = output.transpose(1, 2)  # [b, t, h, v_dim / h]
 
-        if self.training:  # skip cache
+        if not use_cache:  # skip cache
             return output, None, retention
 
         if self.decay_proj is not None:
@@ -469,6 +470,7 @@ class MultiScaleRetention(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         forward_impl: str = "parallel",
         output_retentions: Optional[bool] = False,
+        use_cache: bool = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
         B, T, H = hidden_states.size()
         (sin, cos), decay_mask = rel_pos
@@ -488,7 +490,7 @@ class MultiScaleRetention(nn.Module):
         # retention
         if forward_impl == "parallel":
             retention_out, curr_kv, retention_weights = self.parallel_retention(
-                qr, kr, v, decay_mask
+                qr, kr, v, decay_mask, use_cache=use_cache
             )
         elif forward_impl == "recurrent":
             retention_out, curr_kv = self.recurrent_retention(
@@ -695,6 +697,7 @@ class RetNetDecoderLayer(nn.Module):
         forward_impl: str = "parallel",
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_retentions: Optional[bool] = False,
+        use_cache: bool = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
         residual = hidden_states
         if self.normalize_before:
@@ -707,6 +710,7 @@ class RetNetDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             forward_impl=forward_impl,
             output_retentions=output_retentions,
+            use_cache=use_cache,
         )
         hidden_states = msr_outs[0]
         curr_kv = msr_outs[1]
@@ -1114,7 +1118,7 @@ class RetNetModel(RetNetPreTrainedModel):
                 forward_impl=forward_impl,
                 recurrent_chunk_size=recurrent_chunk_size,
                 retention_mask=retention_mask,
-                get_decay_scale=not self.training,
+                get_decay_scale=use_cache,
             )
 
         # start running through the decoder layers
@@ -1134,7 +1138,7 @@ class RetNetModel(RetNetPreTrainedModel):
 
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
-                        return module(*inputs, output_retentions)
+                        return module(*inputs, output_retentions, use_cache)
 
                     return custom_forward
 
@@ -1154,6 +1158,7 @@ class RetNetModel(RetNetPreTrainedModel):
                     forward_impl=forward_impl,
                     past_key_value=past_key_value,
                     output_retentions=output_retentions,
+                    use_cache=use_cache,
                 )
 
             hidden_states = layer_outputs[0]
