@@ -263,7 +263,8 @@ class MultiScaleRetention(nn.Module):
         retention = retention * decay_mask
 
         # invariant after normalization
-        retention = retention / retention.detach().sum(dim=-1, keepdim=True).abs().clamp(min=1)
+        retention = retention / retention.detach().abs().sum(dim=-1, keepdim=True).clamp(min=1,
+                                                                                         max=5e4)
 
         output = retention @ v  # [b, h, t, v_dim / h]
         output = output.transpose(1, 2)  # [b, t, h, v_dim / h]
