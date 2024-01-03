@@ -53,7 +53,9 @@ class RetNetConfig(object):
         self.xpos_scale_base = kwargs.pop("xpos_scale_base", 512)
         # token id
         self.pad_token_id = kwargs.pop("pad_token_id", 0)
+        self.postprocessing()
 
+    def postprocessing(self):
         if self.deepnorm:
             self.decoder_normalize_before = False
             self.subln = False
@@ -69,3 +71,4 @@ class RetNetConfig(object):
         for hp in self.__dict__.keys():
             if getattr(args, hp, None) is not None:
                 self.__dict__[hp] = getattr(args, hp, None)
+        self.postprocessing()

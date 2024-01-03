@@ -160,7 +160,7 @@ class MultiScaleRetention(nn.Module):
         nn.init.xavier_uniform_(self.k_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.v_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.g_proj.weight, gain=2**-2.5)
-        nn.init.xavier_uniform_(self.out_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight, gain=2**-1)
 
     def parallel_forward(self, qr, kr, v, mask):
         bsz, tgt_len, embed_dim = v.size()
@@ -170,7 +170,7 @@ class MultiScaleRetention(nn.Module):
         qk_mat = qr @ kr.transpose(-1, -2)  # bsz * m * tgt_len * tgt_len
         qk_mat = qk_mat * mask
         # invariant after normalization
-        qk_mat = qk_mat / qk_mat.detach().sum(dim=-1, keepdim=True).abs().clamp(min=1)
+        qk_mat = qk_mat / qk_mat.detach().abs().sum(dim=-1, keepdim=True).clamp(min=1, max=5e4)
         output = torch.matmul(qk_mat, vr)
         output = output.transpose(1, 2)
         return output
