@@ -294,7 +294,7 @@ class MultiScaleRetention(nn.Module):
         nn.init.xavier_uniform_(self.k_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.v_proj.weight, gain=2**-2.5)
         nn.init.xavier_uniform_(self.g_proj.weight, gain=2**-2.5)
-        nn.init.xavier_uniform_(self.out_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight, gain=2**-1)
 
     def parallel_retention(self, q, k, v, decay_mask, use_cache=False):
         """
@@ -314,9 +314,9 @@ class MultiScaleRetention(nn.Module):
         retention = retention * decay_mask
 
         # invariant after normalization
-        retention = retention / retention.detach().sum(
+        retention = retention / retention.detach().abs().sum(
             dim=-1, keepdim=True
-        ).abs().clamp(min=1)
+        ).clamp(min=1, max=5e4)
 
         output = retention @ v  # [b, h, t, v_dim / h]
         output = output.transpose(1, 2)  # [b, t, h, v_dim / h]
